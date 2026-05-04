@@ -57,3 +57,72 @@ The app stores everything in your system's standard config folder:
 *   **NUT Server:** A running [Network UPS Tools](https://networkupstools.org) server is required.
 *   **Permissions:** On Linux/macOS, the app may need administrative privileges to execute the `shutdown` command.
 *   **WOL Support:** Target machines must have **Wake-on-Magic-Packet** enabled in BIOS/UEFI and network adapter settings.
+
+
+## 🛠️ Run as a Background Service
+
+To ensure the monitor starts automatically when your system boots, follow the steps for your operating system:
+
+### 🐧 Linux (systemd)
+1. **Create the service file:**
+   ```bash
+   sudo nano /etc/systemd/system/ups-monitor.service
+   ```
+2. **Paste this content** (update `/path/to/` to your actual folder):
+   ```ini
+   [Unit]
+   Description=UPS Monitor & WOL Service
+   After=network.target
+
+   [Service]
+   Type=simple
+   ExecStart=/path/to/ups-monitor
+   WorkingDirectory=/path/to/
+   Restart=always
+   User=root
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+3. **Enable and Start:**
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now ups-monitor
+   ```
+
+### 🪟 Windows (PowerShell)
+Run this in **PowerShell (Admin)** to create a background task that starts at boot:
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\path\to\ups-monitor.exe" -WorkingDirectory "C:\path\to\"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "UPSMonitor" -User "SYSTEM" -RunLevel Highest
+```
+
+### 🍎 macOS (launchd)
+1. **Create the config file:**
+   ```bash
+   nano ~/Library/LaunchAgents/com.upsmonitor.plist
+   ```
+2. **Paste this content** (update `/path/to/` to your actual folder):
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+   <plist version="1.0">
+   <dict>
+       <key>Label</key>
+       <string>com.upsmonitor</string>
+       <key>ProgramArguments</key>
+       <array>
+           <string>/path/to/ups-monitor</string>
+       </array>
+       <key>RunAtLoad</key>
+       <true/>
+       <key>KeepAlive</key>
+       <true/>
+   </dict>
+   </plist>
+   ```
+3. **Load it:**
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist
+   ```
