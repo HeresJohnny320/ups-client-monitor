@@ -29,20 +29,21 @@ type WakeTarget struct {
 }
 
 type Config struct {
-	Mode               string       `json:"mode"`
-	Host               string       `json:"host"`
-	Username           string       `json:"username"`
-	Password           string       `json:"password"`
-	IntervalSeconds    int          `json:"interval_seconds"`
-	ClientUpsName      string       `json:"client_ups_name,omitempty"`
-	ClientLimit        int          `json:"battery_percent,omitempty"`
-	ClientWebhookURL   string       `json:"client_webhook_url,omitempty"`
-	WakeTargets        []WakeTarget `json:"wake_targets,omitempty"`
-	TestEnabled        bool         `json:"test_enabled"`
-	TestType           string       `json:"test_type"`
-	TestIntervalMonths int          `json:"test_interval_months"`
-	TestWebhookURL     string       `json:"test_webhook_url"`
-	LastTestDate       time.Time    `json:"last_test_date"`
+	Mode               string               `json:"mode"`
+	Host               string               `json:"host"`
+	Username           string               `json:"username"`
+	Password           string               `json:"password"`
+	IntervalSeconds    int                  `json:"interval_seconds"`
+	ClientUpsName      string               `json:"client_ups_name,omitempty"`
+	ClientLimit        int                  `json:"battery_percent,omitempty"`
+	ClientWebhookURL   string               `json:"client_webhook_url,omitempty"`
+	WakeTargets        []WakeTarget         `json:"wake_targets,omitempty"`
+	TestEnabled        bool                 `json:"test_enabled"`
+	TestType           string               `json:"test_type"`
+	TestIntervalMonths int                  `json:"test_interval_months"`
+	TestWebhookURL     string               `json:"test_webhook_url"`
+	TestUpsNames       []string             `json:"test_ups_names"`  // ["ups1", "ups2"]
+	LastTestDate       map[string]time.Time `json:"last_test_dates"` // Tracks each UPS
 }
 
 var lastWakeAttempt = make(map[string]time.Time)
@@ -110,13 +111,11 @@ func testAllWebhooks(config *Config) {
 	log.Println("[INFO] Testing configured webhooks...")
 	testMsg := "🧪 **Webhook Test**: This is a test message from your UPS Monitor to verify connectivity."
 
-	// Test the general Test Webhook
 	if config.TestWebhookURL != "" {
 		log.Println("- Testing: Global Test Webhook")
 		sendDiscordWebhook(config.TestWebhookURL, testMsg+" (General Test Channel)")
 	}
 
-	// Test mode-specific webhooks
 	if config.Mode == "client" && config.ClientWebhookURL != "" {
 		log.Println("- Testing: Client Shutdown Webhook")
 		sendDiscordWebhook(config.ClientWebhookURL, testMsg+" (System Shutdown Channel)")
@@ -146,11 +145,15 @@ func startBackgroundTasks(config *Config) {
 			continue
 		}
 
-		if config.TestEnabled && !config.LastTestDate.IsZero() {
-			nextTestDate := config.LastTestDate.AddDate(0, config.TestIntervalMonths, 0)
-			if time.Now().After(nextTestDate) {
-				log.Println("[SCHEDULER] Triggering scheduled UPS test...")
-				runSelfTest(config, config.TestType)
+		if config.TestEnabled {
+			for _, upsName := range config.TestUpsNames {
+				lastTest := config.LastTestDate[upsName]
+				nextTestDate := lastTest.AddDate(0, config.TestIntervalMonths, 0)
+
+				if time.Now().After(nextTestDate) {
+					log.Printf("[SCHEDULER] Triggering scheduled test for: %s", upsName)
+					runSingleUpsTest(config, upsName, config.TestType)
+				}
 			}
 		}
 
@@ -201,11 +204,15 @@ func startBackgroundTasks(config *Config) {
 }
 
 func runSelfTest(conf *Config, testType string) {
-	log.Printf("[TEST] Running %s self-test...", testType)
+	for _, upsName := range conf.TestUpsNames {
+		runSingleUpsTest(conf, upsName, testType)
+	}
+}
+
+func runSingleUpsTest(conf *Config, upsName string, testType string) {
 	client, err := nut.Connect(conf.Host)
 	if err != nil {
-		errMsg := fmt.Sprintf("❌ **UPS Test Error**: Connection failed: %v", err)
-		sendDiscordWebhook(conf.TestWebhookURL, errMsg)
+		sendDiscordWebhook(conf.TestWebhookURL, "❌ Connection failed for "+upsName)
 		return
 	}
 	defer client.Disconnect()
@@ -216,24 +223,19 @@ func runSelfTest(conf *Config, testType string) {
 		cmdName = "test.battery.start.deep"
 	}
 
-	upsName := conf.ClientUpsName
-	if conf.Mode == "server" && len(conf.WakeTargets) > 0 {
-		upsName = conf.WakeTargets[0].UpsName
-	}
-
 	rawCommand := fmt.Sprintf("INSTCMD %s %s", upsName, cmdName)
 	_, err = client.SendCommand(rawCommand)
 
 	if err != nil {
-		errMsg := fmt.Sprintf("❌ **UPS Test Failed**: Could not start `%s` on `%s`: %v", testType, upsName, err)
-		sendDiscordWebhook(conf.TestWebhookURL, errMsg)
+		sendDiscordWebhook(conf.TestWebhookURL, "❌ Failed to start test on "+upsName)
 	} else {
-		startMsg := fmt.Sprintf("🔍 **UPS Self-Test Started**: `%s` test initiated on `%s`.", testType, upsName)
-		sendDiscordWebhook(conf.TestWebhookURL, startMsg)
-
+		sendDiscordWebhook(conf.TestWebhookURL, "🔍 Started test on "+upsName)
 		go monitorTestResult(conf, upsName)
 
-		conf.LastTestDate = time.Now()
+		if conf.LastTestDate == nil {
+			conf.LastTestDate = make(map[string]time.Time)
+		}
+		conf.LastTestDate[upsName] = time.Now()
 		saveConfig(conf)
 	}
 }
@@ -315,23 +317,26 @@ func interactiveSetup(path string) Config {
 		Mode:               mode,
 		Host:               "127.0.0.1",
 		Username:           "monuser",
-		Password:           "password",
+		Password:           "pass",
 		IntervalSeconds:    30,
 		TestEnabled:        false,
+		TestUpsNames:       []string{"ups1"},
 		TestType:           "quick",
-		TestIntervalMonths: 1,
+		TestIntervalMonths: 3,
 		TestWebhookURL:     "WEBHOOK_URL_HERE",
-		LastTestDate:       time.Now(),
+		LastTestDate:       make(map[string]time.Time),
 	}
 
 	if mode == "server" {
 		conf.WakeTargets = []WakeTarget{
 			{Name: "Node1", MAC: "00:11:22:33:44:55", UpsName: "ups1", WakeLimit: 70, WebhookURL: "WEBHOOK_URL_HERE"},
 		}
+		conf.LastTestDate["ups1"] = time.Now()
 	} else {
 		conf.ClientUpsName = "ups1"
 		conf.ClientLimit = 25
 		conf.ClientWebhookURL = "WEBHOOK_URL_HERE"
+		conf.LastTestDate[conf.ClientUpsName] = time.Now()
 	}
 
 	os.MkdirAll(filepath.Dir(path), 0755)
