@@ -4,91 +4,149 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/linde12/gowol"
-	nut "github.com/robbiet480/go.nut"
+	"golang.org/x/term"
 )
 
-type WakeTarget struct {
-	Name       string `json:"name"`
-	MAC        string `json:"mac"`
-	UpsName    string `json:"ups_name"`
-	WakeLimit  int    `json:"battery_percent"`
-	WebhookURL string `json:"webhook_url"`
+// upsReading is the last state seen for a UPS, shown by the 'status' command.
+type upsReading struct {
+	Status      string
+	Charge      int
+	ChargeKnown bool
+	Seen        time.Time
 }
 
-type Config struct {
-	Mode               string               `json:"mode"`
-	Host               string               `json:"host"`
-	Username           string               `json:"username"`
-	Password           string               `json:"password"`
-	IntervalSeconds    int                  `json:"interval_seconds"`
-	ClientUpsName      string               `json:"client_ups_name,omitempty"`
-	ClientLimit        int                  `json:"battery_percent,omitempty"`
-	ClientWebhookURL   string               `json:"client_webhook_url,omitempty"`
-	WakeTargets        []WakeTarget         `json:"wake_targets,omitempty"`
-	TestEnabled        bool                 `json:"test_enabled"`
-	TestType           string               `json:"test_type"`
-	TestIntervalMonths int                  `json:"test_interval_months"`
-	TestWebhookURL     string               `json:"test_webhook_url"`
-	TestUpsNames       []string             `json:"test_ups_names"`  // ["ups1", "ups2"]
-	LastTestDate       map[string]time.Time `json:"last_test_dates"` // Tracks each UPS
+// remoteState tracks one shutdown target during an outage. It is reset when its UPS is back online.
+type remoteState struct {
+	inFlight    bool
+	done        bool
+	failures    int
+	lastAttempt time.Time
 }
 
-var lastWakeAttempt = make(map[string]time.Time)
+const (
+	remoteRetryInterval = time.Minute
+	testRetryInterval   = time.Hour
+)
+
+var (
+	lastWakeAttempt = make(map[string]time.Time)
+
+	stateMu       sync.Mutex
+	upsReadings   = make(map[string]upsReading)
+	remoteStates  = make(map[string]*remoteState)
+	nutConnected  bool
+	nutChecked    bool
+	nutLastError  string
+	lastPollStart time.Time
+)
+
+// version is set at build time with -ldflags "-X main.version=..."; local builds say "dev".
+var version = "dev"
 
 func main() {
-	baseDir, _ := os.UserConfigDir()
-	appDir := filepath.Join(baseDir, "ups-monitor")
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	daemon := flag.Bool("daemon", false, "run the monitor in the foreground with no UI (for systemd, launchd, Task Scheduler)")
+	dir := flag.String("config-dir", defaultAppDir(), "settings folder holding settings.json, state.json, activity.log and the control socket")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("ups-monitor", version)
+		return
+	}
+	appDir = *dir
 	os.MkdirAll(appDir, 0755)
 
+	// Services have no terminal, so they run the monitor directly like before.
+	if *daemon || !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		runDaemon()
+		return
+	}
+	runUI()
+}
+
+// runDaemon is the long-running monitor. It serves the control socket so the UI can attach.
+func runDaemon() {
 	logFile, err := os.OpenFile(filepath.Join(appDir, "activity.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	writers := []io.Writer{recentLogs}
 	if err == nil {
 		defer logFile.Close()
-		multi := io.MultiWriter(os.Stdout, logFile)
-		log.SetOutput(multi)
+		writers = append(writers, logFile)
+	}
+	// stdout last: a closed stdout must not stop the log file from being written.
+	log.SetOutput(io.MultiWriter(append(writers, os.Stdout)...))
+
+	store, err := openSettingsStore(settingsPath())
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+	ln, err := listenControl()
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+	defer ln.Close()
+
+	if role := store.Get().Role; role == "" {
+		log.Printf("--- UPS Monitor Started (not configured yet: run ups-monitor in a terminal to set it up) --- version %s", version)
+	} else {
+		log.Printf("--- UPS Monitor (%s Mode) Started --- version %s", strings.ToUpper(role), version)
 	}
 
-	config := loadConfig()
-	log.Printf("--- UPS Monitor (%s Mode) Started ---", strings.ToUpper(config.Mode))
+	stop := make(chan struct{})
+	go serveControl(ln, store, stop)
+	go startBackgroundTasks(store)
 
-	go startBackgroundTasks(&config)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	select {
+	case sig := <-sigCh:
+		log.Printf("Received %v, exiting...", sig)
+	case <-stop:
+		log.Println("Stop requested from the UI, exiting...")
+	}
+}
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("Available Commands: 'test', 'test-long', 'test-webhook', 'status', 'exit'")
-	for {
-		fmt.Print("ups-cli> ")
-		input, _ := reader.ReadString('\n')
-		cmd := strings.TrimSpace(strings.ToLower(input))
+// runUI attaches to the running monitor (starting one if needed) and opens the settings TUI.
+func runUI() {
+	log.SetOutput(io.Discard) // the TUI owns the terminal; the monitor writes the log
 
-		switch cmd {
-		case "test":
-			runSelfTest(&config, "quick")
-		case "test-long":
-			runSelfTest(&config, "deep")
-		case "test-webhook":
-			testAllWebhooks(&config)
-		case "status":
-			log.Println("Manual status check requested.")
-		case "exit":
-			log.Println("Exiting application...")
-			return
-		case "":
-			continue
-		default:
-			fmt.Println("Unknown command. Options: test, test-long, test-webhook, status, exit")
+	if _, err := ctlCall(ctlRequest{Cmd: "ping"}); err != nil {
+		if _, err := readSettingsFile(settingsPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "Cannot start: %v\nFix or remove the file and try again.\n", err)
+			os.Exit(1)
 		}
+		fmt.Printf("No UPS monitor is running for %s.\n", appDir)
+		fmt.Println("(If it runs as a service under another account such as root, quit and run this with sudo.)")
+		fmt.Print("Start it in the background now? [Y/n]: ")
+		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(answer)); a != "" && a != "y" && a != "yes" {
+			return
+		}
+		if err := spawnMonitor(); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not start the monitor: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if err := runTUI(); err != nil {
+		fmt.Fprintf(os.Stderr, "UI error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -105,258 +163,89 @@ func sendDiscordWebhook(url, message string) {
 		return
 	}
 	defer resp.Body.Close()
-}
-
-func testAllWebhooks(config *Config) {
-	log.Println("[INFO] Testing configured webhooks...")
-	testMsg := "🧪 **Webhook Test**: This is a test message from your UPS Monitor to verify connectivity."
-
-	if config.TestWebhookURL != "" {
-		log.Println("- Testing: Global Test Webhook")
-		sendDiscordWebhook(config.TestWebhookURL, testMsg+" (General Test Channel)")
-	}
-
-	if config.Mode == "client" && config.ClientWebhookURL != "" {
-		log.Println("- Testing: Client Shutdown Webhook")
-		sendDiscordWebhook(config.ClientWebhookURL, testMsg+" (System Shutdown Channel)")
-	} else if config.Mode == "server" {
-		for _, target := range config.WakeTargets {
-			if target.WebhookURL != "" {
-				log.Printf("- Testing: Wake Target Webhook for %s", target.Name)
-				sendDiscordWebhook(target.WebhookURL, fmt.Sprintf("%s (Wake Node: %s)", testMsg, target.Name))
-			}
-		}
-	}
-	log.Println("[SUCCESS] Webhook test commands sent.")
-}
-
-func startBackgroundTasks(config *Config) {
-	for {
-		client, err := nut.Connect(config.Host)
-		if err != nil {
-			time.Sleep(10 * time.Second)
-			continue
-		}
-
-		_, err = client.Authenticate(config.Username, config.Password)
-		if err != nil {
-			client.Disconnect()
-			time.Sleep(10 * time.Second)
-			continue
-		}
-
-		if config.TestEnabled {
-			for _, upsName := range config.TestUpsNames {
-				lastTest := config.LastTestDate[upsName]
-				nextTestDate := lastTest.AddDate(0, config.TestIntervalMonths, 0)
-
-				if time.Now().After(nextTestDate) {
-					log.Printf("[SCHEDULER] Triggering scheduled test for: %s", upsName)
-					runSingleUpsTest(config, upsName, config.TestType)
-				}
-			}
-		}
-
-		upsList, err := client.GetUPSList()
-		if err == nil {
-			for _, ups := range upsList {
-				var chargeStr, status string
-				for _, v := range ups.Variables {
-					if v.Name == "battery.charge" {
-						chargeStr = fmt.Sprintf("%v", v.Value)
-					}
-					if v.Name == "ups.status" {
-						status = fmt.Sprintf("%v", v.Value)
-					}
-				}
-
-				charge, _ := strconv.Atoi(strings.TrimSpace(chargeStr))
-				isOnBattery := strings.Contains(status, "OB") || strings.Contains(status, "LB")
-
-				if config.Mode == "client" && ups.Name == config.ClientUpsName {
-					if isOnBattery && charge <= config.ClientLimit {
-						msg := fmt.Sprintf("⚠️ **UPS Shutdown**: Battery at %d%%. Shutting down system now.", charge)
-						log.Println(msg)
-						sendDiscordWebhook(config.ClientWebhookURL, msg)
-						shutdownSystem()
-						return
-					}
-				}
-
-				if config.Mode == "server" && !isOnBattery {
-					for _, target := range config.WakeTargets {
-						if target.UpsName == ups.Name && charge >= target.WakeLimit {
-							if time.Since(lastWakeAttempt[target.MAC]) > 15*time.Minute {
-								msg := fmt.Sprintf("✅ **Power Restored**: Waking node `%s` (%s). Battery at %d%%.", target.Name, target.MAC, charge)
-								log.Println(msg)
-								sendDiscordWebhook(target.WebhookURL, msg)
-								wakeNode(target.MAC)
-								lastWakeAttempt[target.MAC] = time.Now()
-							}
-						}
-					}
-				}
-			}
-		}
-		client.Disconnect()
-		time.Sleep(time.Duration(config.IntervalSeconds) * time.Second)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		log.Printf("[WEBHOOK ERROR] Discord returned %s", resp.Status)
 	}
 }
 
-func runSelfTest(conf *Config, testType string) {
-	for _, upsName := range conf.TestUpsNames {
-		runSingleUpsTest(conf, upsName, testType)
+func formatAgo(t time.Time) string {
+	if t.IsZero() {
+		return "never"
 	}
+	return time.Since(t).Round(time.Second).String() + " ago"
 }
 
-func runSingleUpsTest(conf *Config, upsName string, testType string) {
-	client, err := nut.Connect(conf.Host)
+func setNutState(connected bool, err error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if connected != nutConnected || !nutChecked {
+		if connected {
+			log.Println("[INFO] Connected to NUT server.")
+		} else {
+			log.Printf("[ERROR] Cannot reach NUT server: %v", err)
+		}
+	}
+	nutChecked = true
+	nutConnected = connected
+	nutLastError = ""
 	if err != nil {
-		sendDiscordWebhook(conf.TestWebhookURL, "❌ Connection failed for "+upsName)
-		return
+		nutLastError = err.Error()
 	}
-	defer client.Disconnect()
-	client.Authenticate(conf.Username, conf.Password)
+}
 
-	cmdName := "test.battery.start"
-	if testType == "deep" {
-		cmdName = "test.battery.start.deep"
-	}
+// sendDiscordWebhookAsync avoids holding locks or delaying the monitor while Discord responds.
+func sendDiscordWebhookAsync(url, message string) {
+	go sendDiscordWebhook(url, message)
+}
 
-	rawCommand := fmt.Sprintf("INSTCMD %s %s", upsName, cmdName)
-	_, err = client.SendCommand(rawCommand)
+// isOnBatteryStatus reports whether a NUT ups.status means the UPS is running on battery.
+func isOnBatteryStatus(status string) bool {
+	return strings.Contains(status, "OB") || strings.Contains(status, "LB")
+}
 
+func parseCharge(s string) (int, bool) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil {
-		sendDiscordWebhook(conf.TestWebhookURL, "❌ Failed to start test on "+upsName)
-	} else {
-		sendDiscordWebhook(conf.TestWebhookURL, "🔍 Started test on "+upsName)
-		go monitorTestResult(conf, upsName)
-
-		if conf.LastTestDate == nil {
-			conf.LastTestDate = make(map[string]time.Time)
-		}
-		conf.LastTestDate[upsName] = time.Now()
-		saveConfig(conf)
+		return 0, false
 	}
+	return int(f), true
 }
 
-func monitorTestResult(conf *Config, upsName string) {
-	time.Sleep(15 * time.Second)
-
-	for i := 0; i < 30; i++ {
-		client, err := nut.Connect(conf.Host)
-		if err != nil {
-			time.Sleep(10 * time.Second)
-			continue
-		}
-		client.Authenticate(conf.Username, conf.Password)
-
-		upsList, _ := client.GetUPSList()
-		var result string
-		for _, ups := range upsList {
-			if ups.Name == upsName {
-				for _, v := range ups.Variables {
-					if v.Name == "ups.test.result" {
-						result = fmt.Sprintf("%v", v.Value)
-					}
-				}
-			}
-		}
-		client.Disconnect()
-
-		resLower := strings.ToLower(result)
-		if result != "" && !strings.Contains(resLower, "in progress") && !strings.Contains(resLower, "no test") {
-			statusEmoji := "✅"
-			if strings.Contains(resLower, "fail") || strings.Contains(resLower, "bad") || strings.Contains(resLower, "error") {
-				statusEmoji = "🚨"
-			}
-
-			finalMsg := fmt.Sprintf("%s **UPS Test Result**: `%s` reported: **%s**", statusEmoji, upsName, result)
-			sendDiscordWebhook(conf.TestWebhookURL, finalMsg)
-			return
-		}
-		time.Sleep(10 * time.Second)
+func wakeNode(mac, broadcast string) error {
+	if broadcast == "" {
+		broadcast = "255.255.255.255"
 	}
-	sendDiscordWebhook(conf.TestWebhookURL, fmt.Sprintf("⚠️ **UPS Test Timeout**: Result polling for `%s` timed out.", upsName))
-}
-
-func wakeNode(mac string) {
 	packet, err := gowol.NewMagicPacket(mac)
-	if err == nil {
-		packet.Send("255.255.255.255")
-	}
-}
-
-func loadConfig() Config {
-	baseDir, _ := os.UserConfigDir()
-	path := filepath.Join(baseDir, "ups-monitor", "config.json")
-	file, err := os.ReadFile(path)
 	if err != nil {
-		return interactiveSetup(path)
+		log.Printf("[WOL ERROR] Invalid MAC %s: %v", mac, err)
+		return err
 	}
-	var conf Config
-	json.Unmarshal(file, &conf)
-	return conf
+	if err := packet.Send(broadcast); err != nil {
+		log.Printf("[WOL ERROR] Sending to %s via %s: %v", mac, broadcast, err)
+		return err
+	}
+	return nil
 }
 
-func saveConfig(conf *Config) {
-	baseDir, _ := os.UserConfigDir()
-	path := filepath.Join(baseDir, "ups-monitor", "config.json")
-	data, _ := json.MarshalIndent(conf, "", "  ")
-	os.WriteFile(path, data, 0644)
-}
-
-func interactiveSetup(path string) Config {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("No configuration found.")
-	fmt.Print("Choose mode (server/client): ")
-	mode, _ := reader.ReadString('\n')
-	mode = strings.TrimSpace(strings.ToLower(mode))
-
-	conf := Config{
-		Mode:               mode,
-		Host:               "127.0.0.1",
-		Username:           "monuser",
-		Password:           "pass",
-		IntervalSeconds:    30,
-		TestEnabled:        false,
-		TestUpsNames:       []string{"ups1"},
-		TestType:           "quick",
-		TestIntervalMonths: 3,
-		TestWebhookURL:     "WEBHOOK_URL_HERE",
-		LastTestDate:       make(map[string]time.Time),
+func shutdownSystem() error {
+	if os.Getenv("UPS_MONITOR_DRY_RUN") == "1" {
+		log.Println("[DRY RUN] Would shut down this machine now (UPS_MONITOR_DRY_RUN=1).")
+		return nil
 	}
-
-	if mode == "server" {
-		conf.WakeTargets = []WakeTarget{
-			{Name: "Node1", MAC: "00:11:22:33:44:55", UpsName: "ups1", WakeLimit: 70, WebhookURL: "WEBHOOK_URL_HERE"},
-		}
-		conf.LastTestDate["ups1"] = time.Now()
-	} else {
-		conf.ClientUpsName = "ups1"
-		conf.ClientLimit = 25
-		conf.ClientWebhookURL = "WEBHOOK_URL_HERE"
-		conf.LastTestDate[conf.ClientUpsName] = time.Now()
-	}
-
-	os.MkdirAll(filepath.Dir(path), 0755)
-	saveConfig(&conf)
-	fmt.Printf("\nSUCCESS: Config created at %s\nPlease edit and restart.\n", path)
-	os.Exit(0)
-	return conf
-}
-
-func shutdownSystem() {
 	switch runtime.GOOS {
 	case "windows":
-		exec.Command("shutdown", "/s", "/t", "0").Run()
+		return exec.Command("shutdown", "/s", "/t", "0").Run()
 	case "darwin":
-		exec.Command("osascript", "-e", "tell app \"System Events\" to shut down").Run()
+		return exec.Command("osascript", "-e", "tell app \"System Events\" to shut down").Run()
 	case "linux":
 		if _, err := exec.LookPath("midclt"); err == nil {
-			exec.Command("midclt", "call", "system.shutdown").Run()
-		} else {
-			exec.Command("shutdown", "-h", "now").Run()
+			// TrueNAS 25.04+ requires a reason argument; older releases reject it.
+			if err := exec.Command("midclt", "call", "system.shutdown", "UPS battery low").Run(); err == nil {
+				return nil
+			}
+			return exec.Command("midclt", "call", "system.shutdown").Run()
 		}
+		return exec.Command("shutdown", "-h", "now").Run()
 	}
+	return fmt.Errorf("shutdown not supported on %s", runtime.GOOS)
 }

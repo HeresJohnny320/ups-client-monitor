@@ -1,0 +1,148 @@
+name: Test & Build
+
+# Every push to main publishes an alpha prerelease (alpha-<run number>).
+# Pushing a tag like v1.0.0 publishes a normal release instead.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        if: runner.os != 'Linux'
+        run: go test ./...
+
+      - name: Test (race detector)
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+
+  version:
+    name: Pick version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=alpha-$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux PCs, servers, Proxmox VMs/LXCs
+          - { name: linux-amd64, goos: linux, goarch: amd64 }
+          # Raspberry Pi 3/4/5 on 64-bit OS
+          - { name: linux-arm64, goos: linux, goarch: arm64 }
+          # Raspberry Pi 2/3/4 on 32-bit OS
+          - { name: linux-armv7, goos: linux, goarch: arm, goarm: "7" }
+          # Raspberry Pi Zero / Pi 1
+          - { name: linux-armv6, goos: linux, goarch: arm, goarm: "6" }
+          - { name: windows-amd64, goos: windows, goarch: amd64, ext: .exe }
+          - { name: windows-arm64, goos: windows, goarch: arm64, ext: .exe }
+          - { name: darwin-amd64, goos: darwin, goarch: amd64 }
+          - { name: darwin-arm64, goos: darwin, goarch: arm64 }
+          # TrueNAS CORE, pfSense, OPNsense
+          - { name: freebsd-amd64, goos: freebsd, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/ups-monitor-${{ matrix.name }}${{ matrix.ext }}" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ups-monitor-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish ${{ needs.version.outputs.version }}
+    # Only for pushes to main or version tags, never for pull requests.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - name: Release notes
+        run: |
+          if [ "${{ needs.version.outputs.prerelease }}" = "true" ]; then
+            {
+              echo "⚠️ **Alpha build** from \`${GITHUB_SHA::7}\`, published automatically from \`main\`."
+              echo "Test it with \`UPS_MONITOR_DRY_RUN=1\` before relying on it for real shutdowns."
+            } > notes.md
+          else
+            : > notes.md
+          fi
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          name: ${{ needs.version.outputs.prerelease == 'true' && format('Alpha {0}', github.run_number) || needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body_path: notes.md
+          generate_release_notes: true
+          files: dist/*
