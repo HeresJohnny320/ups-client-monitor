@@ -119,7 +119,7 @@ A low wake level gets a machine back quickly. A high one waits until the battery
 
 ### Making sure things actually come back on
 
-Wake-on-LAN only works if the machine shut down cleanly and still has standby power, and it has to be enabled in the BIOS and on the network adapter. If the UPS ran completely flat, the machine lost power entirely and won't see the packet. For that case, set the BIOS option "Restore on AC power loss" to "Power On". Setting both is the most reliable.
+Wake-on-LAN only works if the machine shut down cleanly and still has standby power, and it has to be enabled in the BIOS and on the network adapter. The wake packet goes out on every private network the server is on (your LAN and any VLANs), so leave the broadcast address empty unless you want to limit it to one network. If the UPS ran completely flat, the machine lost power entirely and won't see the packet. For that case, set the BIOS option "Restore on AC power loss" to "Power On". Setting both is the most reliable.
 
 On Proxmox, set your VMs and containers to start at boot so they come back with the host.
 

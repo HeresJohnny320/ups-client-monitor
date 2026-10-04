@@ -136,3 +136,16 @@ func TestParseCharge(t *testing.T) {
 		t.Error("empty charge should be unknown")
 	}
 }
+
+func TestProxmoxExplainsAuthErrors(t *testing.T) {
+	for code, want := range map[int]string{401: "rejected the API token", 403: "Sys.PowerMgmt on /nodes/pve1"} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		_, err := checkRemoteTarget(ShutdownTarget{Type: "proxmox", Host: srv.URL, Node: "pve1", Token: "root@pam!ups=x"})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("HTTP %d: got %v, want it to mention %q", code, err, want)
+		}
+	}
+}

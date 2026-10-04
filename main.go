@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -225,19 +226,86 @@ func parseCharge(s string) (int, bool) {
 }
 
 func wakeNode(mac, broadcast string) error {
-	if broadcast == "" {
-		broadcast = "255.255.255.255"
-	}
+	_, err := wakeNodeVia(mac, broadcast)
+	return err
+}
+
+// wakeNodeVia sends a magic packet and returns the broadcast addresses it went to.
+func wakeNodeVia(mac, broadcast string) ([]string, error) {
 	packet, err := gowol.NewMagicPacket(mac)
 	if err != nil {
 		log.Printf("[WOL ERROR] Invalid MAC %s: %v", mac, err)
-		return err
+		return nil, err
 	}
-	if err := packet.Send(broadcast); err != nil {
-		log.Printf("[WOL ERROR] Sending to %s via %s: %v", mac, broadcast, err)
-		return err
+	var sent, failed []string
+	for _, addr := range wakeAddrs(broadcast) {
+		if err := packet.Send(addr); err != nil {
+			failed = append(failed, addr+": "+err.Error())
+			continue
+		}
+		sent = append(sent, addr)
 	}
-	return nil
+	if len(sent) == 0 {
+		err := fmt.Errorf("could not send on any network (%s)", strings.Join(failed, "; "))
+		log.Printf("[WOL ERROR] Waking %s: %v", mac, err)
+		return nil, err
+	}
+	return sent, nil
+}
+
+// wakeAddrs is where a magic packet goes: the configured broadcast address, or else the
+// broadcast address of every private IPv4 network this machine is on. 255.255.255.255 is
+// only a last resort, because it leaves by the default route, which on a router is the WAN.
+func wakeAddrs(broadcast string) []string {
+	if broadcast != "" {
+		return []string{broadcast}
+	}
+	var addrs []net.Addr
+	ifaces, _ := net.Interfaces()
+	for _, i := range ifaces {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagBroadcast == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		a, _ := i.Addrs()
+		addrs = append(addrs, a...)
+	}
+	if out := privateBroadcasts(addrs); len(out) > 0 {
+		return out
+	}
+	return []string{"255.255.255.255"}
+}
+
+// privateBroadcasts returns the subnet broadcast address of each private IPv4 network.
+// Public networks (like a router's WAN) are skipped so magic packets never go to the ISP.
+func privateBroadcasts(addrs []net.Addr) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipn.IP.To4()
+		if ip == nil || !ip.IsPrivate() {
+			continue
+		}
+		mask := ipn.Mask
+		if len(mask) == net.IPv6len {
+			mask = mask[12:]
+		}
+		if ones, bits := mask.Size(); bits != 32 || ones >= 31 {
+			continue // point-to-point links have no broadcast address
+		}
+		b := make(net.IP, 4)
+		for i := range b {
+			b[i] = ip[i] | ^mask[i]
+		}
+		if !seen[b.String()] {
+			seen[b.String()] = true
+			out = append(out, b.String())
+		}
+	}
+	return out
 }
 
 func shutdownSystem() error {

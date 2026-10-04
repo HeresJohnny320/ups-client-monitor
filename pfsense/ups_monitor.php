@@ -575,8 +575,8 @@ if ($tab === 'machines') {
 			'Leave empty if it shouldn\'t be woken. Enable Wake-on-LAN in its BIOS and network adapter.');
 		upsmon_row('Wake at', upsmon_input('wake_at', $wk['at_percent'] ?? 80, 'number', 'min="0" max="100"'),
 			'After an outage, wake it once the UPS is back on mains and charged to this %.');
-		upsmon_row('Broadcast address', upsmon_input('wake_bcast', $wk['broadcast'] ?? '', 'text', 'placeholder="255.255.255.255"'),
-			'Only needed for another subnet, e.g. 192.168.20.255.');
+		upsmon_row('Broadcast address', upsmon_input('wake_bcast', $wk['broadcast'] ?? '', 'text', 'placeholder="automatic"'),
+			'Leave empty to send it on every LAN and VLAN this firewall is on. Set it (e.g. 192.168.20.255) to use only that network.');
 		upsmon_row('Discord webhook', upsmon_input('webhook', $m['webhook_url'] ?? ''), 'Optional. Leave empty to use the one under Settings.');
 		upsmon_panel_close();
 

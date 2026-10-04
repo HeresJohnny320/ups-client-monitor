@@ -133,3 +133,48 @@ func TestWrongVersionRejected(t *testing.T) {
 		t.Fatalf("expected a version error, got %v", err)
 	}
 }
+
+func TestProxmoxTokenFormat(t *testing.T) {
+	if got := cleanProxmoxToken("  PVEAPIToken=root@pam!ups=1a2b-3c4d \n"); got != "root@pam!ups=1a2b-3c4d" {
+		t.Errorf("cleaning a pasted header gave %q", got)
+	}
+	good := []string{"root@pam!ups=1a2b3c4d-1111-2222-3333-444455556666", "monitor@pve!shutdown=abc"}
+	bad := []string{
+		"1a2b3c4d-1111-2222-3333-444455556666", // only the secret
+		"root@pam!ups",                         // only the token ID
+		"ups=1a2b3c4d",                         // no user@realm
+		"root@pam=1a2b3c4d",                    // no token ID
+		"root@pam!ups=1a2b 3c4d",               // a space in the middle
+	}
+	for _, tok := range good {
+		if err := checkProxmoxToken("pve1", tok); err != nil {
+			t.Errorf("%q rejected: %v", tok, err)
+		}
+	}
+	for _, tok := range bad {
+		if err := checkProxmoxToken("pve1", tok); err == nil || !strings.Contains(err.Error(), "USER@REALM!TOKENID=SECRET") {
+			t.Errorf("%q accepted or unclear error: %v", tok, err)
+		}
+	}
+}
+
+func TestBadTokenBlocksSavingButNotStarting(t *testing.T) {
+	appDir = t.TempDir()
+	s := newSettings("server")
+	s.Server.Machines = []Machine{{Name: "pve1", Type: MachineProxmox, UPS: "ups1", ShutdownAt: 50,
+		Proxmox: &ProxmoxAPI{Host: "https://10.0.0.5:8006", Node: "pve1", Token: "1a2b3c4d-only-the-secret"}}}
+
+	store, _ := openSettingsStore(settingsPath())
+	if _, err := store.Set(s); err == nil {
+		t.Fatal("saving a malformed token should be refused")
+	}
+
+	// A settings file that already has one (e.g. from before this check) still loads,
+	// so the monitor keeps running after an upgrade.
+	if err := writePrivateJSON(settingsPath(), s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSettingsFile(settingsPath()); err != nil {
+		t.Fatalf("existing settings with a bad token must still load: %v", err)
+	}
+}

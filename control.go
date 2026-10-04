@@ -212,6 +212,12 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 		if m.Type != MachineProxmox && m.Type != MachineTrueNAS {
 			return ctlResponse{Error: "only Proxmox and TrueNAS machines have a login to test"}
 		}
+		if m.Type == MachineProxmox && m.Proxmox != nil {
+			m.Proxmox.Token = cleanProxmoxToken(m.Proxmox.Token)
+			if err := checkProxmoxToken(m.Name, m.Proxmox.Token); err != nil {
+				return ctlResponse{Error: err.Error()}
+			}
+		}
 		info, err := checkRemoteTarget(m.apiTarget())
 		if err != nil {
 			return ctlResponse{Error: err.Error()}
@@ -222,10 +228,11 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			return ctlResponse{Error: "fill in the Wake-on-LAN MAC first"}
 		}
 		w := req.Machine.Wake
-		if err := wakeNode(w.MAC, w.Broadcast); err != nil {
+		via, err := wakeNodeVia(w.MAC, w.Broadcast)
+		if err != nil {
 			return ctlResponse{Error: err.Error()}
 		}
-		return ctlResponse{OK: true, Info: "Magic packet sent to " + w.MAC}
+		return ctlResponse{OK: true, Info: "Magic packet sent to " + w.MAC + " via " + strings.Join(via, ", ")}
 	case "action":
 		s := store.Get()
 		if s.Role == "" {

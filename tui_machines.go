@@ -349,7 +349,8 @@ func (u *ui) machineForm(idx int, d machineDraft, ret viewFunc) {
 	f.AddInputField("Wake at battery %", strconv.Itoa(d.wk.AtPercent), 4, tview.InputFieldInteger, func(s string) { d.wk.AtPercent = atoi(s) })
 	f.AddInputField("WOL broadcast (optional)", d.wk.Broadcast, 18, nil, func(s string) { d.wk.Broadcast = strings.TrimSpace(s) })
 	f.AddInputField("Discord webhook (optional)", m.WebhookURL, 50, nil, func(s string) { m.WebhookURL = strings.TrimSpace(s) })
-	help += "\nWake: fill in the MAC to turn it back on after an outage (enable Wake-on-LAN in its BIOS).\nUPS names: " + u.knownUPS() + " · Webhook defaults to the server's (General)."
+	help += "\nWake: fill in the MAC to turn it back on after an outage (enable Wake-on-LAN in its BIOS). Leave the\n" +
+		"broadcast empty to send on every local network. UPS names: " + u.knownUPS() + " · Webhook defaults to the server's (General)."
 
 	saveLabel := "Save"
 	if m.Type == MachineClient {
@@ -407,11 +408,12 @@ func (u *ui) machineForm(idx int, d machineDraft, ret viewFunc) {
 			u.alert("Fill in the Wake-on-LAN MAC first.")
 			return
 		}
-		if err := wakeNode(d.wk.MAC, d.wk.Broadcast); err != nil {
+		via, err := wakeNodeVia(d.wk.MAC, d.wk.Broadcast)
+		if err != nil {
 			u.alert("Wake-on-LAN failed:\n\n" + err.Error())
 			return
 		}
-		u.flash("[green]✔ Magic packet sent to " + tview.Escape(d.wk.MAC) + "[-]")
+		u.flash("[green]✔ Magic packet sent to " + tview.Escape(d.wk.MAC) + " via " + tview.Escape(strings.Join(via, ", ")) + "[-]")
 	})
 	if idx >= 0 {
 		f.AddButton("Delete", func() {

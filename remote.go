@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -130,10 +131,21 @@ func proxmoxRequest(t ShutdownTarget, method, path string, form url.Values) ([]b
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("proxmox API %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	detail := strings.TrimSpace(string(data))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return data, nil
+	case http.StatusUnauthorized:
+		return nil, errors.New("Proxmox rejected the API token (401). Check it's USER@REALM!TOKENID=SECRET with the right realm " +
+			"(root@pam, not root@pve), and that the token still exists under Datacenter > Permissions > API Tokens")
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("Proxmox accepted the token but it isn't allowed to do this (403). "+
+			"Give it Sys.PowerMgmt on /nodes/%s, or untick Privilege Separation on the token. %s", t.Node, detail)
 	}
-	return data, nil
+	if detail == "" {
+		return nil, fmt.Errorf("proxmox API %s", resp.Status)
+	}
+	return nil, fmt.Errorf("proxmox API %s: %s", resp.Status, detail)
 }
 
 type rpcRequest struct {

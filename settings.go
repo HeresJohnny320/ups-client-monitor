@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -240,6 +241,9 @@ func normalizeSettings(s *Settings) {
 			if m.Type != MachineProxmox {
 				m.Proxmox = nil
 			}
+			if m.Proxmox != nil {
+				m.Proxmox.Token = cleanProxmoxToken(m.Proxmox.Token)
+			}
 			if m.Type != MachineTrueNAS {
 				m.TrueNAS = nil
 			}
@@ -345,6 +349,42 @@ func validateServer(srv *ServerSettings) error {
 				return fmt.Errorf("%s: invalid MAC address %q", m.Name, w.MAC)
 			}
 			if err := validatePercent(m.Name+": wake battery", w.AtPercent); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// proxmoxTokenRe matches USER@REALM!TOKENID=SECRET, e.g. root@pam!ups=1a2b3c4d-....
+var proxmoxTokenRe = regexp.MustCompile(`^[^\s@!=]+@[^\s@!=]+![^\s@!=]+=\S+$`)
+
+// cleanProxmoxToken trims spaces and a pasted "PVEAPIToken=" header prefix.
+func cleanProxmoxToken(tok string) string {
+	tok = strings.TrimSpace(tok)
+	if len(tok) > len("PVEAPIToken=") && strings.EqualFold(tok[:len("PVEAPIToken=")], "PVEAPIToken=") {
+		tok = tok[len("PVEAPIToken="):]
+	}
+	return tok
+}
+
+func checkProxmoxToken(name, tok string) error {
+	if proxmoxTokenRe.MatchString(tok) {
+		return nil
+	}
+	return fmt.Errorf("%s: the API token should look like USER@REALM!TOKENID=SECRET, e.g. root@pam!ups=1a2b3c4d-.... "+
+		"It's the token ID and its secret joined with \"=\"", name)
+}
+
+// checkEdits catches mistakes in settings that are being saved. It only runs when saving,
+// never when loading, so an existing settings file can't stop the monitor from starting.
+func checkEdits(s *Settings) error {
+	if !s.isServer() {
+		return nil
+	}
+	for _, m := range s.Server.Machines {
+		if m.Type == MachineProxmox && m.Proxmox != nil {
+			if err := checkProxmoxToken(m.Name, m.Proxmox.Token); err != nil {
 				return err
 			}
 		}
@@ -461,6 +501,9 @@ func (st *settingsStore) Set(s Settings) (Settings, error) {
 	s = cloneSettings(s)
 	normalizeSettings(&s)
 	if err := validateSettings(&s); err != nil {
+		return Settings{}, err
+	}
+	if err := checkEdits(&s); err != nil {
 		return Settings{}, err
 	}
 	st.mu.Lock()

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,5 +115,40 @@ func TestWakeOnServerStart(t *testing.T) {
 	handleWakes(s.Server, ev("ups1", 100, false))
 	if wakesSent("nas") != 1 {
 		t.Fatal("did not wake after the server started")
+	}
+}
+
+func TestWakeGoesToEachPrivateSubnet(t *testing.T) {
+	cidr := func(s string) net.Addr {
+		ip, n, err := net.ParseCIDR(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.IP = ip // keep the host address, like an interface does
+		return n
+	}
+	addrs := []net.Addr{
+		cidr("192.168.1.1/24"),  // LAN
+		cidr("10.0.20.1/24"),    // a VLAN
+		cidr("172.16.5.9/16"),   // another private range
+		cidr("192.168.1.77/24"), // same LAN again: sent once
+		cidr("203.0.113.5/24"),  // public WAN: skipped, never broadcast to the ISP
+		cidr("100.64.3.2/10"),   // CGNAT WAN: skipped
+		cidr("10.9.9.9/32"),     // VPN host route: no broadcast address
+		cidr("10.8.0.1/31"),     // point-to-point: no broadcast address
+		cidr("fd00::1/64"),      // IPv6 has no broadcast
+	}
+	got := strings.Join(privateBroadcasts(addrs), ",")
+	if want := "192.168.1.255,10.0.20.255,172.16.255.255"; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+
+	if a := wakeAddrs("192.168.20.255"); len(a) != 1 || a[0] != "192.168.20.255" {
+		t.Errorf("a configured broadcast address must be used as-is, got %v", a)
+	}
+	for _, a := range wakeAddrs("") {
+		if a == "" {
+			t.Error("empty address")
+		}
 	}
 }
