@@ -641,7 +641,9 @@ if ($tab === 'settings') {
 			$last[] = upsmon_h($u) . ' ' . upsmon_ago($when);
 		}
 		upsmon_row('UPS names', upsmon_input('st_ups', implode(', ', $t['ups'] ?? array())),
-			'Comma separated. Needs a NUT user allowed to run instant commands.' . ($last ? ' Last tests: ' . implode(', ', $last) . '.' : ''));
+			'Comma separated. Needs a NUT user (set under NUT above) that may run instant commands. With pfSense\'s NUT package, add one under ' .
+			'<b>Services &gt; UPS &gt; Settings &gt; Advanced settings</b>, in "Additional configuration lines for upsd.users".' .
+			($last ? ' Last tests: ' . implode(', ', $last) . '.' : ''));
 		upsmon_row('Discord webhook', upsmon_input('st_webhook', $t['webhook_url'] ?? ''), 'Optional. Leave empty to use the one above.');
 		upsmon_panel_close();
 	} else {

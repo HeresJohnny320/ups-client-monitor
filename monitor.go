@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -218,12 +220,13 @@ func runSingleUpsTest(store *settingsStore, srv *ServerSettings, upsName string,
 	}
 	defer client.Disconnect()
 
-	cmdName := "test.battery.start"
-	if testType == "deep" {
-		cmdName = "test.battery.start.deep"
-	}
-	if _, err := client.SendCommand(fmt.Sprintf("INSTCMD %s %s", upsName, cmdName)); err != nil {
-		log.Printf("[TEST] Failed to start %s on %s: %v (self-tests need a NUT user allowed to run instant commands)", cmdName, upsName, err)
+	cmdName, err := startUpsTest(&client, upsName, testType)
+	if err != nil {
+		hint := ""
+		if strings.Contains(err.Error(), "authentication") {
+			hint = " (self-tests need a NUT user allowed to run instant commands)"
+		}
+		log.Printf("[TEST] Could not start a %s test on %s: %v%s", testType, upsName, err, hint)
 		sendDiscordWebhook(webhook, "❌ Failed to start test on "+upsName)
 		return
 	}
@@ -231,6 +234,78 @@ func runSingleUpsTest(store *settingsStore, srv *ServerSettings, upsName string,
 	sendDiscordWebhook(webhook, "🔍 Started test on "+upsName)
 	go monitorTestResult(*srv, upsName)
 	store.state.MarkTested(upsName)
+}
+
+// nutCommander is the part of the NUT client the self-test needs (a fake in tests).
+type nutCommander interface {
+	SendCommand(cmd string) ([]string, error)
+}
+
+// Battery-test commands to try, best first. Many UPSes (e.g. most usbhid-ups models)
+// only offer the .quick/.deep variants, others only the plain one.
+var testCommands = map[string][]string{
+	"quick": {"test.battery.start.quick", "test.battery.start"},
+	"deep":  {"test.battery.start.deep", "test.battery.start"},
+}
+
+// startUpsTest starts a battery self-test using whichever command this UPS supports,
+// and returns the command it used.
+func startUpsTest(client nutCommander, upsName, testType string) (string, error) {
+	candidates := testCommands[testType]
+	if candidates == nil {
+		return "", fmt.Errorf("unknown test type %q", testType)
+	}
+	// Ask the UPS which commands it has. If that fails, just try the candidates in order.
+	if supported, err := upsCommands(client, upsName); err == nil {
+		var usable, tests []string
+		for _, c := range candidates {
+			if supported[c] {
+				usable = append(usable, c)
+			}
+		}
+		if len(usable) == 0 {
+			for c := range supported {
+				if strings.HasPrefix(c, "test.battery") {
+					tests = append(tests, c)
+				}
+			}
+			sort.Strings(tests)
+			if len(tests) == 0 {
+				return "", errors.New("this UPS doesn't offer a battery self-test through NUT")
+			}
+			return "", fmt.Errorf("this UPS doesn't offer a %s battery test (it has: %s)", testType, strings.Join(tests, ", "))
+		}
+		candidates = usable
+	}
+
+	var lastErr error
+	for _, c := range candidates {
+		_, err := client.SendCommand(fmt.Sprintf("INSTCMD %s %s", upsName, c))
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+		if !strings.Contains(err.Error(), "support the instant command") {
+			break // a real error (e.g. login), not just an unsupported command
+		}
+	}
+	return "", lastErr
+}
+
+// upsCommands returns the instant commands a UPS supports (NUT's LIST CMD).
+func upsCommands(client nutCommander, upsName string) (map[string]bool, error) {
+	resp, err := client.SendCommand("LIST CMD " + upsName)
+	if err != nil {
+		return nil, err
+	}
+	prefix := "CMD " + upsName + " "
+	out := map[string]bool{}
+	for _, line := range resp {
+		if strings.HasPrefix(line, prefix) {
+			out[strings.TrimSpace(strings.TrimPrefix(line, prefix))] = true
+		}
+	}
+	return out, nil
 }
 
 func monitorTestResult(srv ServerSettings, upsName string) {

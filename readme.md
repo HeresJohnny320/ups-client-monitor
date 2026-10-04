@@ -80,6 +80,17 @@ A few pfSense specifics:
 - Settings live in `/usr/local/etc/ups-monitor`. pfSense's own config backups don't include that folder, so copy `settings.json` and the two `link-*.pem` files somewhere safe.
 - The default LAN rule already lets PCs on your LAN reach port 3494. For PCs on other interfaces or VLANs, add a pass rule for TCP 3494 to "This Firewall". Don't open it on WAN.
 - The terminal UI works on pfSense too: run `ups-monitor` over SSH.
+- Battery self-tests need a NUT user that's allowed to run them. With pfSense's NUT package, go to **Services → UPS → Settings → Advanced settings** and add this to "Additional configuration lines for upsd.users" (pick your own password):
+
+  ```
+  [upsmonitor]
+      password = pick-a-password
+      instcmds = test.battery.start.quick
+      instcmds = test.battery.start.deep
+      instcmds = test.battery.start
+  ```
+
+  Then enter `upsmonitor` and that password as the NUT username and password under UPS Monitor's **Settings**.
 - To remove it, run `ups-monitor -uninstall-pfsense`. Your settings folder is left in place.
 
 ## The power plan
