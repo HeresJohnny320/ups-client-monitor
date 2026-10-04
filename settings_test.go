@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -46,8 +47,12 @@ func TestSettingsRoundTripAndPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(settingsPath())
-	if err != nil || fi.Mode().Perm() != 0600 {
-		t.Fatalf("settings.json should be private (0600), got %v %v", fi.Mode().Perm(), err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows has no Unix permission bits (the per-user AppData folder keeps it private there).
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
+		t.Fatalf("settings.json should be private (0600), got %v", fi.Mode().Perm())
 	}
 	back, err := readSettingsFile(settingsPath())
 	if err != nil {
