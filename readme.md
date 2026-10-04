@@ -1,92 +1,64 @@
-# 🔌 UPS Monitor & Wake-on-LAN
+# UPS Monitor
 
-A lightweight, automated Go tool to manage power safety and network recovery. It monitors your UPS (via NUT) to trigger safe shutdowns during outages and sends Wake-on-LAN "Magic Packets" to restore your infrastructure when power returns.
+I wanted one small box to keep an eye on my UPSes and take care of everything else when the power goes out: shut my servers down in a sensible order before the batteries run flat, and turn them back on once the power has been back for a while. This is that.
 
----
+It reads your UPSes from a [NUT](https://networkupstools.org) server and can:
 
-## 🚀 Quick Start
+- shut down Proxmox VE and TrueNAS through their own APIs (nothing to install on them)
+- shut down Windows, Linux and macOS machines that run this app in client mode
+- wake everything back up with Wake-on-LAN after the outage, in the order you choose
 
-1.  **Run the app** in a terminal:
-    ```bash
-    ./ups-monitor
-    ```
-2.  **Start the monitor:** If none is running, it asks to start one in the background. Answer **Y**.
-3.  **Set up in the TUI:** On first run, pick **Server** or **Client**, then fill in your NUT server and add your machines. Every **Save** is validated, written to `settings.json`, and **applied live**. No restart is needed.
-4.  **Quit with `q`:** The monitor keeps running in the background. Run `./ups-monitor` again at any time to see live status or change settings. It finds the running monitor and attaches to it.
+Each machine gets its own battery level, so on a long outage the less important stuff goes down first and the important stuff stays up as long as possible.
 
----
-
-## 📥 Download
-
-Prebuilt binaries for Linux (x86-64, Raspberry Pi arm64/armv7/armv6), Windows, macOS and FreeBSD are on the [Releases](../../releases) page.
-*   **Alpha builds** (`alpha-N`, marked *Pre-release*) are published automatically on every push to `main`. They are tested in CI but not on real hardware. Try them with [dry run](#-testing-safely) first.
-*   **Versioned releases** (`v1.0.0`, ...) are published when a version tag is pushed.
-
-Run `ups-monitor -version` to see which build you have.
-
----
-
-## 🛠 Operation Modes
+## How it fits together
 
 ```
-                ┌──────────── NUT (upsd) ────────────┐
-                │                                     │
-                ▼  reads battery / status             │
-        ┌──────────────┐  shutdown order   ┌──────────────────┐
-        │    SERVER    │ ─────────────────▶│ CLIENT (Windows, │  one outbound TLS connection
-        │ (e.g. a Pi)  │   (TLS, pinned)   │  Linux, macOS)   │  from the client; no open ports
-        └──────────────┘                   └──────────────────┘
-          │        │
-          │        └── Proxmox / TrueNAS API ──▶ shutdown
-          └── Wake-on-LAN magic packet ──▶ everything, once power is back
+          NUT (upsd)
+              │
+              ▼
+     ┌─────────────────┐ ──── shutdown order ────▶  client PCs (this app)
+     │     server      │ ──── Proxmox / TrueNAS API ──▶  shut down
+     │  (e.g. a Pi)    │ ──── Wake-on-LAN ──────────▶  everything, once power is back
+     └─────────────────┘
 ```
 
-### 🌐 Server Mode ("The Manager")
-**Best for:** Always-on devices like a Raspberry Pi. It is the only machine that talks to NUT.
-*   **Decides for everyone:** Each client, Proxmox and TrueNAS server gets its own shutdown battery %, set on the server.
-*   **Client shutdown:** Sends a shutdown order to linked clients. See [Linking Clients](#-linking-clients).
-*   **Remote Shutdown (Proxmox / TrueNAS):** Shuts down Proxmox VE and TrueNAS through their APIs. Nothing is installed on them. See [Remote Shutdown](#-remote-shutdown-proxmox--truenas).
-*   **Multiple UPSes:** Reads every UPS on your NUT server. Each machine is assigned to the UPS that powers it, so `ups2` can control your servers while `ups1` controls your PC.
-*   **WOL Recovery:** After an outage, wakes machines in order as the UPS recharges. See [Power Plan](#-power-plan).
-*   **Auto Self-Tests:** Optional scheduled UPS battery tests (off by default).
+You run it in **server** mode on something that stays on, like a Raspberry Pi plugged into the UPS. The server is the only thing that talks to NUT, and it makes all the decisions.
 
-### 🏠 Client Mode ("The Protector")
-**Best for:** Workstations, gaming PCs, Windows servers, anything that should shut down cleanly.
-*   **Only needs the server:** Paste a pairing code from the server. The client doesn't need NUT details.
-*   **Locked down:** The client never listens on the network. It makes one outbound, encrypted connection to the server, verifies it is *your* server, and the only command it accepts is **shutdown**. It cannot be told to run anything else, start anything, or change its settings remotely.
-*   **Failsafe:** If the server goes silent while the UPS is on battery (for example, the network switch lost power), the client shuts itself down after a delay (60s by default, `0` turns it off).
+Anything else that should shut itself down cleanly runs it in **client** mode. A client only needs a pairing code from the server. It never listens on the network: it makes a single outgoing, encrypted connection to the server, and the only thing the server can tell it to do is shut down.
 
----
+## Getting started
 
-## 🖥️ Terminal UI
+Grab a build for your platform from the [Releases](../../releases) page, or build it yourself (see the end of this page).
 
-Running `ups-monitor` in a terminal opens a menu-driven UI attached to the background monitor:
+### Setting up the server
 
-| Screen | What it does |
-|---|---|
-| **Status & Logs** | Live NUT (or server) connection, UPS charge/power state, each machine's state, and recent activity |
-| **General** | Role (server/client). Server: NUT host/port/login, poll interval, client port, wake after restart, default Discord webhook. Client: failsafe and webhook |
-| **Power Plan** *(server)* | Per UPS: the shutdown order on battery and the wake order when power returns. Flags machines that won't come back on |
-| **Machines** *(server)* | Add, edit or delete machines (Proxmox, TrueNAS, client, Wake-on-LAN only). **Test Connection**, **Pairing Code**, **New Key**, **Wake Now** |
-| **Server Connection** *(client)* | Paste the pairing code from the server |
-| **UPS Self-Tests** *(server)* | Schedule, test type, which UPSes, webhook |
-| **Run Actions** | Server: quick/deep self-test now, check Proxmox/TrueNAS logins, test webhooks. Client: test webhook |
-| **Stop Background Monitor** | Stops monitoring until you start it again |
+Run it in a terminal:
 
-Keys: `↑/↓` move, `Enter`/`Tab` open a screen or next field, `Esc` back to the menu, `q` quit. The monitor keeps running after you quit, and the mouse works too.
+```bash
+./ups-monitor
+```
 
-Hand edits to `settings.json` are also picked up while the monitor runs. An invalid edit is logged and ignored, and the previous settings stay in effect.
+It'll offer to start the monitor in the background. Say yes, pick **Server**, then:
 
-### Options
-*   `-daemon`: Run the monitor in the foreground with no UI (for services). This is automatic when there is no terminal, so existing service setups keep working.
-*   `-config-dir <path>`: Use a different settings folder.
-*   `-version`: Print the version.
+1. Under **General**, point it at your NUT server. The NUT username and password are optional; you only need them for battery self-tests.
+2. Under **Machines**, add each thing it should look after. For each one, pick which UPS powers it, the battery % to shut it down at, and (optionally) its MAC address and the battery % to wake it back up at.
+3. Check **Power Plan** to see it all laid out per UPS.
 
----
+Every save takes effect straight away. When you quit with `q`, the monitor keeps running in the background; run `./ups-monitor` again whenever you want to check on it or change something.
 
-## 🗺️ Power Plan
+### Setting up a client
 
-Every machine has a **UPS**, a **shut down at ≤ X%** (except wake-only machines), and optionally a **Wake-on-LAN MAC** with **wake at ≥ Y%**. All of it is on one form per machine. **Power Plan** shows the result per UPS:
+On the server, add the PC under **Machines** with the type set to *Client (this app)*. When you save, it shows a pairing code that looks like `upsmon://192.168.1.5:3494?...`.
+
+On the PC, run `./ups-monitor`, pick **Client**, go to **Server Connection** and paste the code. That's it. The client's Status screen should show it's connected, plus the battery level the server will shut it down at.
+
+The code includes the client's secret key, so treat it like a password. To copy it out of the terminal, hold Shift while you select it with the mouse.
+
+The server needs TCP port 3494 open so clients can reach it (you can change the port under General). Clients don't need any ports open.
+
+## The power plan
+
+Every machine is tied to one UPS and has a "shut down at" level. It can also have a MAC address and a "wake at" level. The **Power Plan** screen puts it all together per UPS:
 
 ```
 ⚡ ups2   on mains 100%
@@ -102,65 +74,76 @@ Every machine has a **UPS**, a **shut down at ≤ X%** (except wake-only machine
     ! desk has no Wake-on-LAN MAC, so it stays off after an outage
 ```
 
-**How waking works:**
-*   Machines are **only woken after a power event**: their UPS went on battery, or the server itself restarted (it may have lost power too; you can turn that off under General). A machine you turn off on purpose stays off.
-*   Once that UPS is back on mains and recharged to the wake %, **3 packets are sent 5 minutes apart**, in case the first arrives while the machine is still shutting down. Then it stops until the next outage.
-*   A low wake % brings a machine back quickly. A high one waits until the battery could ride out another outage.
+If NUT reports low battery (`LB`) before a machine's level is reached, it gets shut down anyway.
 
-**Best way to turn machines back on:**
-*   **Wake-on-LAN** (built in) works when the machine shut down cleanly and still has standby power. Enable it in the BIOS/UEFI and the network adapter.
-*   **BIOS "Restore on AC power loss" → Power On** covers the case where the UPS ran completely flat and the machine lost power entirely. Set **both** for reliable recovery.
-*   **Proxmox:** set VMs/containers to *Start at boot* so they come up after the host wakes.
+Machines are only woken after something happened to the power: either their UPS went on battery, or the server itself restarted (in case it lost power too; you can switch that off under General). So if you turn a PC off on purpose, it stays off. Once the UPS is back on mains and charged up to a machine's wake level, the server sends three wake packets, five minutes apart, in case the first one arrived while the machine was still shutting down.
 
----
+A low wake level gets a machine back quickly. A high one waits until the battery could carry it through another outage.
 
-## 🔗 Linking Clients
+### Making sure things actually come back on
 
-1.  **On the server:** open **Machines** → **+ Add machine**, set **Type** to *Client (this app)*, and enter a name, the UPS it is powered by, and the battery % to shut it down at. Save. A **pairing code** appears (show it again later with **Pairing Code**):
-    ```
-    upsmon://192.168.1.5:3494?fp=…&id=desk&key=…
-    ```
-    It contains the server address, the client's secret key, and the server's certificate fingerprint. **Treat it like a password.** To copy it, select it with **Shift + mouse drag**. Line breaks picked up while copying are ignored.
-2.  **On the client:** run `ups-monitor`, choose **Client**, open **Server Connection**, paste the code, and **Save & Connect**. The Status screen shows the server's UPS state and the shutdown % the server set.
-3.  **Firewall:** allow inbound TCP **3494** on the server (configurable under General). Clients need no inbound ports.
+Wake-on-LAN only works if the machine shut down cleanly and still has standby power, and it has to be enabled in the BIOS and on the network adapter. If the UPS ran completely flat, the machine lost power entirely and won't see the packet. For that case, set the BIOS option "Restore on AC power loss" to "Power On". Setting both is the most reliable.
 
-**Security:**
-*   The link is TLS 1.3. The client pins the server's certificate fingerprint, so a different machine pretending to be the server is refused.
-*   Each client has its own random key. A wrong key is rejected and logged on the server.
-*   **New Key** or **Delete** on the server disconnects that client immediately.
-*   The server identity lives in `link-cert.pem` / `link-key.pem` in the server's settings folder. Keep these when moving or reinstalling the server, or every client must be paired again.
+On Proxmox, set your VMs and containers to start at boot so they come back with the host.
 
----
+## Proxmox and TrueNAS
 
-## 🧪 Testing Safely
+The server shuts these down through their APIs. Each one gets a single shutdown request per outage; if the request fails, it's retried every minute. Use **Test Connection** on the machine's form to check your credentials. It only logs in and doesn't shut anything down.
 
-Set `UPS_MONITOR_DRY_RUN=1` to log shutdowns instead of doing them. This works on clients. Proxmox/TrueNAS shutdowns are **not** affected, so use **Test Connection** for those.
+Both systems ship with self-signed certificates, so leave "Verify TLS certificate" off unless you've installed a proper one.
+
+### Proxmox VE
+
+Create an API token that's only allowed to power nodes on and off:
+
+1. **Datacenter → Permissions → Roles → Create.** Name it `UPSShutdown` and give it `Sys.PowerMgmt`.
+2. **Datacenter → Permissions → API Tokens → Add.** User `root@pam`, token ID `ups`. Copy the secret now; Proxmox only shows it once.
+3. **Datacenter → Permissions → Add → API Token Permission.** Path `/nodes/<your node>`, token `root@pam!ups`, role `UPSShutdown`.
+
+In the machine's form, the API token is `root@pam!ups=<secret>` and the node name is the one shown in the Proxmox sidebar. The host is usually `https://<ip>:8006`.
+
+Shutting down a node shuts its VMs and containers down gracefully, in their configured order. In a cluster, add each node as its own machine.
+
+### TrueNAS
+
+Go to **Settings (top-right menu) → API Keys → Add**, pick a user such as `truenas_admin`, and copy the key. Enter that user and the key in the machine's form.
+
+The host has to start with `https://`. TrueNAS revokes any API key that's sent over plain HTTP, so the app refuses to try. It talks to the WebSocket API that TrueNAS 25.04 and later use (TrueNAS 26 dropped the old REST API).
+
+## Client safety net
+
+If a client loses contact with the server while its UPS is on battery (say the network switch wasn't on the UPS), it waits 60 seconds and then shuts itself down. You can change the delay under General on the client, or set it to 0 to turn this off.
+
+## Trying it out safely
+
+Set `UPS_MONITOR_DRY_RUN=1` and the app will log "would shut down now" instead of actually doing it:
+
 ```bash
-UPS_MONITOR_DRY_RUN=1 ./ups-monitor        # Linux / macOS
-$env:UPS_MONITOR_DRY_RUN=1; .\ups-monitor.exe   # Windows PowerShell
+UPS_MONITOR_DRY_RUN=1 ./ups-monitor              # Linux / macOS
+$env:UPS_MONITOR_DRY_RUN=1; .\ups-monitor.exe    # Windows PowerShell
 ```
-Then trigger a short outage (or pull the UPS plug) and watch **Status & Logs** on both machines.
 
----
+Then unplug the UPS for a bit and watch **Status & Logs**. This only covers the machine it runs on: Proxmox and TrueNAS will still really shut down, so test those with **Test Connection** instead.
 
-## ⚙️ Settings & Logs
+## Settings and files
 
-Everything lives in your system's standard config folder:
-- **Windows:** `%AppData%\ups-monitor\`
-- **Linux:** `~/.config/ups-monitor/`
-- **macOS:** `~/Library/Application Support/ups-monitor/`
+Everything is kept in your normal config folder:
 
-| File | What it is |
+- Linux: `~/.config/ups-monitor/`
+- Windows: `%AppData%\ups-monitor\`
+- macOS: `~/Library/Application Support/ups-monitor/`
+
+In there you'll find:
+
+| File | What it's for |
 |---|---|
-| `settings.json` | Your settings (owner-only, `0600`: it holds passwords and API tokens) |
-| `state.json` | Data the monitor keeps for itself, such as last self-test dates |
-| `activity.log` | Every power event, shutdown, wake and self-test result |
-| `link-cert.pem` / `link-key.pem` *(server)* | The server's identity for paired clients. **Back these up** |
-| `control.sock` | Private socket the UI uses to talk to the running monitor |
+| `settings.json` | Your settings. Only your user can read it, since it holds passwords and API keys. |
+| `state.json` | Things the app remembers for itself, like when each UPS was last self-tested. |
+| `activity.log` | A record of every outage, shutdown, wake and self-test. |
+| `link-cert.pem`, `link-key.pem` | The server's identity, which clients check before trusting it. Back these up; if you lose them, every client has to be paired again. |
+| `control.sock` | How the UI talks to the running monitor. |
 
-> **Upgrading from an older version:** the old `config.json` is **not read** (and is left untouched). Set things up again in the UI. The monitor logs a notice if it finds one.
-
-The UI is the easy way to edit settings, but `settings.json` is meant to be readable. A server example:
+You don't have to touch `settings.json`, but it's plain JSON and the monitor picks up changes while it runs. If an edit doesn't make sense, it's logged and ignored and the old settings stay in place. Here's what a server's file looks like:
 
 ```json
 {
@@ -192,105 +175,100 @@ The UI is the easy way to edit settings, but `settings.json` is meant to be read
 }
 ```
 
-*   **Machine types:** `proxmox`, `truenas`, `client` (a PC running this app in client mode) and `wake_only` (never shut down, only woken).
-*   **`webhook_url`:** The server's webhook gets every event. A machine's own `webhook_url` overrides it for that machine.
-*   **NUT login:** Optional. Most setups only need it for self-tests, which require a NUT user allowed to run instant commands.
+A machine's `type` is `proxmox`, `truenas`, `client` or `wake_only` (woken after outages but never shut down). The server's `webhook_url` gets a Discord message for everything that happens; give a machine its own `webhook_url` to send its messages somewhere else.
 
----
+**Upgrading from the old version:** the old `config.json` isn't read anymore. It's left alone, and you'll need to set things up again in the UI. Until you do, the monitor just sits there and logs that it's waiting for setup.
 
-## 🔌 Proxmox & TrueNAS
+## Running it at boot
 
-The server shuts these down through their own API, so nothing is installed on them. Each gets one shutdown per outage. A failed request is retried every minute, and only the first failure is posted to Discord. A NUT `LB` (low battery) flag also triggers the shutdown. `verify_tls: false` accepts the self-signed certificates both systems ship with. Use **Test Connection** to check a token without shutting anything down.
+The monitor notices when it's started without a terminal (by systemd, Task Scheduler and so on) and runs without the UI. You can also force that with `-daemon`.
 
-### Proxmox VE API token
-1. **Datacenter → Permissions → Roles → Create**: name `UPSShutdown`, privileges `Sys.PowerMgmt`.
-2. **Datacenter → Permissions → API Tokens → Add**: user `root@pam`, Token ID `ups`. Copy the secret; it is shown only once.
-3. **Datacenter → Permissions → Add → API Token Permission**: path `/nodes/<node>`, token `root@pam!ups`, role `UPSShutdown`.
-4. Enter `root@pam!ups=<secret>` as the **API token** and the node name shown in the sidebar as **Node name**.
+### Linux (systemd)
 
-Shutting down a node stops its VMs/containers gracefully, following their shutdown order. For a cluster, add one machine per node.
+Save this as `/etc/systemd/system/ups-monitor.service`, with `/path/to/` changed to wherever you put the binary:
 
-### TrueNAS API key
-1. Go to **Settings (top-right user menu) → API Keys → Add**, pick the user (e.g. `truenas_admin`), and copy the key.
-2. Enter that user as **Username** and the key as **API key**.
+```ini
+[Unit]
+Description=UPS Monitor
+After=network.target
 
-This uses the JSON-RPC WebSocket API (`wss://<host>/api/current`, TrueNAS 25.04+), which is required on TrueNAS 26 because the REST API was removed. The host **must** be `https://`, because TrueNAS revokes API keys sent over plain HTTP.
+[Service]
+ExecStart=/path/to/ups-monitor -daemon
+Restart=always
+User=root
 
----
+[Install]
+WantedBy=multi-user.target
+```
 
-## 💡 Requirements
-*   **NUT Server:** A running [Network UPS Tools](https://networkupstools.org) server is required, and only the **server** connects to it.
-*   **Network:** Clients must reach the server on TCP 3494.
-*   **Permissions:** On Linux/macOS, the app may need administrative privileges to execute the `shutdown` command.
-*   **WOL Support:** Target machines must have **Wake-on-Magic-Packet** enabled in BIOS/UEFI and network adapter settings.
+Then:
 
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ups-monitor
+```
 
-## 🛠️ Run as a Background Service
+Because the service runs as root, open the UI with `sudo /path/to/ups-monitor` so it finds the right settings. To stop the monitor, use `systemctl stop ups-monitor`; the "Stop Background Monitor" menu item won't stick, because systemd just starts it again.
 
-To ensure the monitor starts automatically when your system boots, follow the steps for your operating system:
+### Windows
 
-### 🐧 Linux (systemd)
-1. **Create the service file:**
-   ```bash
-   sudo nano /etc/systemd/system/ups-monitor.service
-   ```
-2. **Paste this content** (update `/path/to/` to your actual folder):
-   ```ini
-   [Unit]
-   Description=UPS Monitor & WOL Service
-   After=network.target
+In an admin PowerShell:
 
-   [Service]
-   Type=simple
-   ExecStart=/path/to/ups-monitor -daemon
-   WorkingDirectory=/path/to/
-   Restart=always
-   User=root
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-3. **Enable and Start:**
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now ups-monitor
-   ```
-4. **Change settings:** Run `sudo /path/to/ups-monitor`. The service runs as root, so open the UI as root to attach to it and use its `/root/.config/ups-monitor` settings. Don't use **Stop Background Monitor** here, because `Restart=always` brings it back. Use `systemctl stop` instead.
-
-### 🪟 Windows (PowerShell)
-Run this in **PowerShell (Admin)** to create a background task that starts at boot:
 ```powershell
-$action = New-ScheduledTaskAction -Execute "C:\path\to\ups-monitor.exe" -Argument "-daemon -config-dir C:\ProgramData\ups-monitor" -WorkingDirectory "C:\path\to\"
+$action = New-ScheduledTaskAction -Execute "C:\path\to\ups-monitor.exe" -Argument "-daemon -config-dir C:\ProgramData\ups-monitor"
 $trigger = New-ScheduledTaskTrigger -AtStartup
 Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "UPSMonitor" -User "SYSTEM" -RunLevel Highest
 ```
-To change settings, open an **Admin** terminal and run `C:\path\to\ups-monitor.exe -config-dir C:\ProgramData\ups-monitor`. The shared folder lets your admin terminal reach the monitor, which runs as SYSTEM.
 
-### 🍎 macOS (launchd)
-1. **Create the config file:**
-   ```bash
-   nano ~/Library/LaunchAgents/com.upsmonitor.plist
-   ```
-2. **Paste this content** (update `/path/to/` to your actual folder):
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
-   <plist version="1.0">
-   <dict>
-       <key>Label</key>
-       <string>com.upsmonitor</string>
-       <key>ProgramArguments</key>
-       <array>
-           <string>/path/to/ups-monitor</string>
-       </array>
-       <key>RunAtLoad</key>
-       <true/>
-       <key>KeepAlive</key>
-       <true/>
-   </dict>
-   </plist>
-   ```
-3. **Load it:**
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist
-   ```
+The task runs as SYSTEM, so both it and you need to use the same settings folder. To open the UI, run `C:\path\to\ups-monitor.exe -config-dir C:\ProgramData\ups-monitor` from an admin terminal.
+
+### macOS (launchd)
+
+Save this as `~/Library/LaunchAgents/com.upsmonitor.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.upsmonitor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/ups-monitor</string>
+        <string>-daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Then load it with `launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist`.
+
+## Command-line options
+
+| Option | What it does |
+|---|---|
+| `-daemon` | Run the monitor without the UI. |
+| `-config-dir <path>` | Use a different settings folder. |
+| `-version` | Print the version and exit. |
+
+## Builds and releases
+
+Every push to `main` gets tested on Linux, Windows and macOS and published as an alpha pre-release (`alpha-1`, `alpha-2`, …). Those haven't been tested on real hardware, so give them a dry run first. Tagged versions like `v1.0.0` are published as normal releases. `ups-monitor -version` tells you which one you're running.
+
+There are builds for Linux (x86-64, plus arm64, armv7 and armv6 for Raspberry Pis), Windows (x64 and ARM), macOS (Intel and Apple Silicon) and FreeBSD.
+
+To build it yourself you need Go:
+
+```bash
+go build -o ups-monitor .
+./build.sh          # or build every platform into ./build
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
