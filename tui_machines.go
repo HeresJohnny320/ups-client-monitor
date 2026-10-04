@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -436,26 +435,21 @@ func (u *ui) machineForm(idx int, d machineDraft, ret viewFunc) {
 
 // showPairing displays the code to paste into the client's Server Connection screen.
 func (u *ui) showPairing(m Machine) {
-	resp, err := ctlCall(ctlRequest{Cmd: "link_info"})
+	resp, err := ctlCall(ctlRequest{Cmd: "pairing", Name: m.Name})
 	if err != nil {
-		u.alert("Could not get pairing details: " + err.Error())
+		u.alert("Could not get the pairing code: " + err.Error())
 		return
-	}
-	info := resp.Link
-	addrs := info.Addresses
-	if len(addrs) == 0 {
-		addrs = []string{"SERVER-IP"}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[::b]Pairing code for %s[::-]\n\n", tview.Escape(m.Name))
 	b.WriteString("On the client: run ups-monitor, choose Client, open Server Connection and paste this.\n")
 	b.WriteString("[gray]Select with Shift + mouse drag to copy. Treat it like a password.[-]\n\n")
-	for i, a := range addrs {
-		if len(addrs) > 1 {
-			fmt.Fprintf(&b, "[yellow]Using %s:[-]\n", a)
+	for i, p := range resp.Pairing {
+		if len(resp.Pairing) > 1 {
+			fmt.Fprintf(&b, "[yellow]Using %s:[-]\n", p.Address)
 		}
-		b.WriteString(pairingCode(net.JoinHostPort(a, strconv.Itoa(info.Port)), m.Name, m.ClientKey, info.Fingerprint))
-		if i < len(addrs)-1 {
+		b.WriteString(p.Code)
+		if i < len(resp.Pairing)-1 {
 			b.WriteString("\n\n")
 		}
 	}

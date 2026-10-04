@@ -56,6 +56,32 @@ The code includes the client's secret key, so treat it like a password. To copy 
 
 The server needs TCP port 3494 open so clients can reach it (you can change the port under General). Clients don't need any ports open.
 
+### Running the server on pfSense
+
+If your UPS is plugged into your pfSense box (or pfSense already runs the NUT package), it makes a good server, and you get a proper page in the pfSense web UI to run it from.
+
+Log in to pfSense over SSH (or open **Diagnostics → Command Prompt**) and run:
+
+```sh
+fetch -o - https://raw.githubusercontent.com/HeresJohnny320/ups-client-monitor/main/pfsense/install.sh | sh
+```
+
+That downloads the right build for your box (amd64, or arm64 for Netgate ARM appliances), checks it against the release's checksums, and sets everything up:
+
+- a page under **Services → UPS Monitor** with Status, Power Plan, Machines and Settings tabs
+- a **UPS Monitor** dashboard widget (add it from the dashboard's **+** menu)
+- an entry on **Status → Services**, so you can start, stop and restart it there, and it starts at boot
+
+Then open **Services → UPS Monitor**, go to **Settings**, choose **Server** and point it at NUT. If the NUT package runs on the same box, the default of `127.0.0.1` is right. From there it works just like the terminal version: add your machines, check the Power Plan, and pair your PCs. Pairing codes have a **Copy** button.
+
+A few pfSense specifics:
+
+- To update, run the same command again. Your settings are kept.
+- Settings live in `/usr/local/etc/ups-monitor`. pfSense's own config backups don't include that folder, so copy `settings.json` and the two `link-*.pem` files somewhere safe.
+- The default LAN rule already lets PCs on your LAN reach port 3494. For PCs on other interfaces or VLANs, add a pass rule for TCP 3494 to "This Firewall". Don't open it on WAN.
+- The terminal UI works on pfSense too: run `ups-monitor` over SSH.
+- To remove it, run `ups-monitor -uninstall-pfsense`. Your settings folder is left in place.
+
 ## The power plan
 
 Every machine is tied to one UPS and has a "shut down at" level. It can also have a MAC address and a "wake at" level. The **Power Plan** screen puts it all together per UPS:
@@ -255,12 +281,14 @@ Then load it with `launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist`.
 | `-daemon` | Run the monitor without the UI. |
 | `-config-dir <path>` | Use a different settings folder. |
 | `-version` | Print the version and exit. |
+| `-install-pfsense` | Install or update the pfSense page, widget and service (run as root on pfSense). |
+| `-uninstall-pfsense` | Remove them again. Settings are kept. |
 
 ## Builds and releases
 
 Every push to `main` gets tested on Linux, Windows and macOS and published as an alpha pre-release (`alpha-1`, `alpha-2`, …). Those haven't been tested on real hardware, so give them a dry run first. Tagged versions like `v1.0.0` are published as normal releases. `ups-monitor -version` tells you which one you're running.
 
-There are builds for Linux (x86-64, plus arm64, armv7 and armv6 for Raspberry Pis), Windows (x64 and ARM), macOS (Intel and Apple Silicon) and FreeBSD.
+There are builds for Linux (x86-64, plus arm64, armv7 and armv6 for Raspberry Pis), Windows (x64 and ARM), macOS (Intel and Apple Silicon) and FreeBSD (amd64 and arm64, which is what pfSense uses).
 
 To build it yourself you need Go:
 

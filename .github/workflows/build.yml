@@ -83,8 +83,10 @@ jobs:
           - { name: windows-arm64, goos: windows, goarch: arm64, ext: .exe }
           - { name: darwin-amd64, goos: darwin, goarch: amd64 }
           - { name: darwin-arm64, goos: darwin, goarch: arm64 }
-          # TrueNAS CORE, pfSense, OPNsense
+          # pfSense, OPNsense, TrueNAS CORE
           - { name: freebsd-amd64, goos: freebsd, goarch: amd64 }
+          # pfSense Plus on Netgate ARM appliances (1100, 2100)
+          - { name: freebsd-arm64, goos: freebsd, goarch: arm64 }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

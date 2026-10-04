@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,9 +21,11 @@ import (
 // Running the app again in a terminal connects to it to view status and edit settings live.
 
 type ctlRequest struct {
-	Cmd      string    `json:"cmd"` // ping, get_settings, set_settings, status, action, link_info, stop
+	Cmd      string    `json:"cmd"` // ping, get_settings, set_settings, status, action, link_info, pairing, test_machine, wake, stop
 	Settings *Settings `json:"settings,omitempty"`
 	Action   string    `json:"action,omitempty"`
+	Machine  *Machine  `json:"machine,omitempty"` // test_machine, wake (may be unsaved, straight from a form)
+	Name     string    `json:"name,omitempty"`    // pairing: the client machine's name
 }
 
 type ctlResponse struct {
@@ -31,6 +34,14 @@ type ctlResponse struct {
 	Settings *Settings   `json:"settings,omitempty"`
 	Status   *StatusInfo `json:"status,omitempty"`
 	Link     *LinkInfo   `json:"link,omitempty"`
+	Pairing  []Pairing   `json:"pairing,omitempty"`
+	Info     string      `json:"info,omitempty"`
+}
+
+// Pairing is a client's pairing code for one of the server's addresses.
+type Pairing struct {
+	Address string `json:"address"`
+	Code    string `json:"code"`
 }
 
 type UPSInfo struct {
@@ -60,6 +71,7 @@ type LinkInfo struct {
 
 type StatusInfo struct {
 	PID          int                  `json:"pid"`
+	Version      string               `json:"version"`
 	Started      time.Time            `json:"started"`
 	SettingsPath string               `json:"settings_path"`
 	Role         string               `json:"role"`
@@ -185,6 +197,35 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			port = s.Server.ListenPort
 		}
 		return ctlResponse{OK: true, Link: &LinkInfo{Fingerprint: fp, Port: port, Addresses: lanAddresses()}}
+	case "pairing":
+		codes, err := pairingCodes(store, req.Name)
+		if err != nil {
+			return ctlResponse{Error: err.Error()}
+		}
+		return ctlResponse{OK: true, Pairing: codes}
+	case "test_machine":
+		if req.Machine == nil {
+			return ctlResponse{Error: "no machine sent"}
+		}
+		m := req.Machine.clone()
+		m.Type = strings.ToLower(m.Type)
+		if m.Type != MachineProxmox && m.Type != MachineTrueNAS {
+			return ctlResponse{Error: "only Proxmox and TrueNAS machines have a login to test"}
+		}
+		info, err := checkRemoteTarget(m.apiTarget())
+		if err != nil {
+			return ctlResponse{Error: err.Error()}
+		}
+		return ctlResponse{OK: true, Info: info}
+	case "wake":
+		if req.Machine == nil || req.Machine.Wake == nil || req.Machine.Wake.MAC == "" {
+			return ctlResponse{Error: "fill in the Wake-on-LAN MAC first"}
+		}
+		w := req.Machine.Wake
+		if err := wakeNode(w.MAC, w.Broadcast); err != nil {
+			return ctlResponse{Error: err.Error()}
+		}
+		return ctlResponse{OK: true, Info: "Magic packet sent to " + w.MAC}
 	case "action":
 		s := store.Get()
 		if s.Role == "" {
@@ -216,6 +257,7 @@ func statusSnapshot(s Settings) StatusInfo {
 
 	st := StatusInfo{
 		PID:          os.Getpid(),
+		Version:      version,
 		Started:      monitorStarted,
 		SettingsPath: settingsPath(),
 		Role:         s.Role,
@@ -272,6 +314,38 @@ func statusSnapshot(s Settings) StatusInfo {
 		}
 	}
 	return st
+}
+
+// pairingCodes builds a client machine's pairing code for each of the server's addresses.
+func pairingCodes(store *settingsStore, name string) ([]Pairing, error) {
+	s := store.Get()
+	if !s.isServer() {
+		return nil, errors.New("pairing codes come from a server")
+	}
+	var client *Machine
+	for _, m := range s.Server.Machines {
+		if m.Type == MachineClient && m.Name == name {
+			m := m
+			client = &m
+		}
+	}
+	if client == nil {
+		return nil, fmt.Errorf("no client machine named %q", name)
+	}
+	fp, err := hub.identity()
+	if err != nil {
+		return nil, err
+	}
+	addrs := lanAddresses()
+	if len(addrs) == 0 {
+		addrs = []string{"SERVER-IP"}
+	}
+	var out []Pairing
+	for _, a := range addrs {
+		hostPort := net.JoinHostPort(a, strconv.Itoa(s.Server.ListenPort))
+		out = append(out, Pairing{Address: a, Code: pairingCode(hostPort, client.Name, client.ClientKey, fp)})
+	}
+	return out, nil
 }
 
 // ctlCall sends one request to the running monitor.

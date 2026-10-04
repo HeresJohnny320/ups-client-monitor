@@ -63,11 +63,24 @@ var version = "dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	pfInstall := flag.Bool("install-pfsense", false, "install (or update) the pfSense web page, widget and service, then start it")
+	pfUninstall := flag.Bool("uninstall-pfsense", false, "remove the pfSense web page, widget and service (settings are kept)")
 	daemon := flag.Bool("daemon", false, "run the monitor in the foreground with no UI (for systemd, launchd, Task Scheduler)")
 	dir := flag.String("config-dir", defaultAppDir(), "settings folder holding settings.json, state.json, activity.log and the control socket")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ups-monitor", version)
+		return
+	}
+	if *pfInstall || *pfUninstall {
+		run := installPfSense
+		if *pfUninstall {
+			run = uninstallPfSense
+		}
+		if err := run(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	appDir = *dir

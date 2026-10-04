@@ -22,5 +22,6 @@ build windows-arm64 windows arm64 "" .exe
 build darwin-amd64  darwin  amd64
 build darwin-arm64  darwin  arm64
 build freebsd-amd64 freebsd amd64
+build freebsd-arm64 freebsd arm64
 
 echo "Done!"

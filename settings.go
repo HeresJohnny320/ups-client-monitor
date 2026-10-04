@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -142,7 +143,16 @@ func (m Machine) apiTarget() ShutdownTarget {
 // It defaults to the user config dir and can be overridden with -config-dir.
 var appDir string
 
+// pfsenseSettingsDir is where the pfSense install keeps its settings.
+const pfsenseSettingsDir = "/usr/local/etc/ups-monitor"
+
 func defaultAppDir() string {
+	// On pfSense the service uses a fixed folder, so a plain "ups-monitor" over SSH finds it.
+	if runtime.GOOS == "freebsd" {
+		if fi, err := os.Stat(pfsenseSettingsDir); err == nil && fi.IsDir() {
+			return pfsenseSettingsDir
+		}
+	}
 	baseDir, _ := os.UserConfigDir()
 	return filepath.Join(baseDir, "ups-monitor")
 }
