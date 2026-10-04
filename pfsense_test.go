@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,7 @@ func TestPfSenseInstallAndUninstall(t *testing.T) {
 	pfRoot = root
 	pfRun = func(name string, args ...string) error {
 		rel, _ := filepath.Rel(root, name)
+		rel = filepath.ToSlash(rel) // Windows test runners use backslashes
 		if strings.HasSuffix(name, "php") {
 			// The register script is a temporary file; record only that it ran and how.
 			calls = append(calls, rel+" "+args[0]+" register.php "+args[2])
@@ -35,19 +37,11 @@ func TestPfSenseInstallAndUninstall(t *testing.T) {
 	}
 
 	for _, dst := range pfWebFiles {
-		if fi, err := os.Stat(filepath.Join(root, dst)); err != nil || fi.Mode().Perm() != 0644 {
-			t.Errorf("/%s not installed as 0644: %v", dst, err)
-		}
+		checkInstalled(t, filepath.Join(root, dst), 0644)
 	}
-	if fi, err := os.Stat(filepath.Join(root, pfRCPath)); err != nil || fi.Mode().Perm() != 0755 {
-		t.Errorf("boot script not installed as executable: %v", err)
-	}
-	if fi, err := os.Stat(filepath.Join(root, pfBinPath)); err != nil || fi.Mode().Perm() != 0755 || fi.Size() == 0 {
-		t.Errorf("program not copied: %v", err)
-	}
-	if fi, err := os.Stat(filepath.Join(root, pfsenseSettingsDir)); err != nil || fi.Mode().Perm() != 0700 {
-		t.Errorf("settings folder not created private: %v", err)
-	}
+	checkInstalled(t, filepath.Join(root, pfRCPath), 0755)
+	checkInstalled(t, filepath.Join(root, pfBinPath), 0755)
+	checkInstalled(t, filepath.Join(root, pfsenseSettingsDir), 0700)
 	want := []string{
 		"usr/local/bin/php -f register.php install",
 		"usr/local/etc/rc.d/ups_monitor.sh restart",
@@ -100,6 +94,23 @@ func TestEmbeddedPfSenseFilesMatchRepo(t *testing.T) {
 		if err != nil || string(embedded) != string(onDisk) {
 			t.Errorf("%s: embedded copy differs from the file in the repo", src)
 		}
+	}
+}
+
+// checkInstalled fails if path is missing (or an empty file), or on Unix if its permissions
+// differ. Windows has no Unix permission bits; the installer only runs on pfSense anyway.
+func checkInstalled(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Errorf("%s was not installed: %v", path, err)
+		return
+	}
+	if !fi.IsDir() && fi.Size() == 0 {
+		t.Errorf("%s is empty", path)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != mode {
+		t.Errorf("%s has mode %v, want %v", path, fi.Mode().Perm(), mode)
 	}
 }
 
