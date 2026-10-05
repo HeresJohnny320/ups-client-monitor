@@ -95,21 +95,21 @@ A few pfSense specifics:
 
 ## The power plan
 
-Every machine is tied to one UPS and has a "shut down at" level. It can also have a MAC address and a "wake at" level. The **Power Plan** screen puts it all together per UPS:
+Every machine is tied to one UPS and has a "shut down at" level. It can also have a MAC address and a "wake at" level. The **Power Plan** screen puts it all together per UPS, one row per machine:
 
 ```
-⚡ ups2   on mains 100%
-  On battery, as the charge drops:
-    ≤  90%   shut down   truenas
-    ≤  50%   shut down   pve1
-  Power back, as the battery recharges:
-    ≥  40%   wake        truenas
-    ≥  80%   wake        pve1
 ⚡ ups1   on mains 100%
-  On battery, as the charge drops:
-    ≤  30%   shut down   desk
-    ! desk has no Wake-on-LAN MAC, so it stays off after an outage
+  Off order   Machine     Shuts down at       Wake order   Wakes at
+  1st         dell r710   ≤ 90%               2nd          ≥ 60%
+  2nd         truenas     ≤ 30%               1st          ≥ 40%
+  —           proxmox2    off: left running   3rd          ≥ 80%
+⚡ ups2   on mains 100%
+  1st         gaming-pc   ≤ 40%               —            not woken (no MAC)
 ```
+
+The higher a machine's shutdown %, the earlier it goes down; the lower its wake %, the earlier it comes back. Machines with the same % go together.
+
+Each machine also has a **Shut down automatically** switch. Turn it off to leave that machine running during an outage, for example while you're working on it; it's still woken afterwards. On pfSense, the Machines list has a one-click **Turn shutdown off/on** button for this.
 
 If NUT reports low battery (`LB`) before a machine's level is reached, it gets shut down anyway.
 

@@ -109,8 +109,10 @@ func (u *ui) machinesView() (tview.Primitive, tview.Primitive) {
 	for i, m := range ms {
 		row := i + 1
 		off, on := "—", "—"
-		if m.shutsDown() {
+		if m.autoShutdown() {
 			off = fmt.Sprintf("≤ %d%%", m.ShutdownAt)
+		} else if m.shutsDown() {
+			off = "[yellow]off[-]"
 		}
 		if m.Wake != nil {
 			on = fmt.Sprintf("≥ %d%%", m.Wake.AtPercent)
@@ -144,27 +146,24 @@ func (u *ui) machinesView() (tview.Primitive, tview.Primitive) {
 
 // ---------- Power plan ----------
 
-type planStep struct {
-	pct  int
-	name string
-	note string
-	open func()
-}
-
-// powerPlanView shows, per UPS, the shutdown order on battery and the wake order once power is back.
+// powerPlanView shows, per UPS, one row per machine: its place in the shutdown order and
+// in the wake order, so each machine's two halves line up.
 func (u *ui) powerPlanView() (tview.Primitive, tview.Primitive) {
 	ret := u.powerPlanView
 	t := tview.NewTable().SetSelectable(true, false)
 	actions := map[int]func(){}
 	row := 0
-	add := func(text string, open func()) {
-		cell := tview.NewTableCell(text).SetExpansion(1)
-		if open == nil {
-			cell.SetSelectable(false)
-		} else {
+	put := func(cols []string, open func()) {
+		for c, text := range cols {
+			cell := tview.NewTableCell(text).SetExpansion(1)
+			if open == nil {
+				cell.SetSelectable(false)
+			}
+			t.SetCell(row, c, cell)
+		}
+		if open != nil {
 			actions[row] = open
 		}
-		t.SetCell(row, 0, cell)
 		row++
 	}
 
@@ -186,51 +185,33 @@ func (u *ui) powerPlanView() (tview.Primitive, tview.Primitive) {
 				}
 			}
 		}
-		add(fmt.Sprintf("[::b]⚡ %s[::-]   %s", tview.Escape(ups), state), nil)
+		put([]string{fmt.Sprintf("[::b]⚡ %s[::-]", tview.Escape(ups)), state}, nil)
+		put([]string{"  [::b]Off order", "Machine", "Shuts down at", "Wake order", "Wakes at[::-]"}, nil)
 
-		var down, up []planStep
-		var noWake []planStep
-		for i, m := range ms {
-			if m.UPS != ups {
-				continue
-			}
-			i, m := i, m
-			open := func() { u.editMachine(i, m, ret) }
+		rows := powerPlan(ms, ups)
+		if len(rows) == 0 {
+			put([]string{"  [gray]no machines on this UPS[-]"}, nil)
+		}
+		for _, r := range rows {
+			r := r
+			m := r.Machine
+			offOrder, offAt := "  —", "[gray]never (wake only)[-]"
 			if m.shutsDown() {
-				step := planStep{m.ShutdownAt, m.Name, machineTypeLabels[m.Type], open}
-				down = append(down, step)
-				if m.Wake == nil {
-					noWake = append(noWake, step)
+				offAt = "[yellow]off: left running[-]"
+				if m.autoShutdown() {
+					offOrder, offAt = "  "+ordinal(r.ShutdownRank), fmt.Sprintf("≤ %d%%", m.ShutdownAt)
 				}
 			}
+			wakeOrder, wakeAt := "—", "[orange]not woken (no MAC)[-]"
 			if m.Wake != nil {
-				up = append(up, planStep{m.Wake.AtPercent, m.Name, m.Wake.MAC, open})
+				wakeOrder, wakeAt = ordinal(r.WakeRank), fmt.Sprintf("≥ %d%%", m.Wake.AtPercent)
 			}
+			name := tview.Escape(m.Name) + " [gray](" + machineTypeLabels[m.Type] + ")[-]"
+			put([]string{offOrder, name, offAt, wakeOrder, wakeAt}, func() { u.editMachine(r.Index, m, ret) })
 		}
-		// Highest % shuts down first; lowest % wakes first.
-		sort.SliceStable(down, func(a, b int) bool { return down[a].pct > down[b].pct })
-		sort.SliceStable(up, func(a, b int) bool { return up[a].pct < up[b].pct })
-
-		add("  [yellow]On battery, as the charge drops:[-]", nil)
-		if len(down) == 0 {
-			add("    [gray]nothing is shut down[-]", nil)
-		}
-		for _, d := range down {
-			add(fmt.Sprintf("    ≤ %3d%%   shut down   %-20s [gray]%s[-]", d.pct, tview.Escape(d.name), d.note), d.open)
-		}
-		add("  [green]Power back, as the battery recharges:[-]", nil)
-		if len(up) == 0 {
-			add("    [gray]nothing is woken[-]", nil)
-		}
-		for _, w := range up {
-			add(fmt.Sprintf("    ≥ %3d%%   wake        %-20s [gray]%s[-]", w.pct, tview.Escape(w.name), w.note), w.open)
-		}
-		for _, d := range noWake {
-			add(fmt.Sprintf("    [orange]! %s has no Wake-on-LAN MAC, so it stays off after an outage[-]", tview.Escape(d.name)), d.open)
-		}
-		add("", nil)
+		put([]string{""}, nil)
 	}
-	add("[green]+ Add machine[-]", func() { u.editMachine(-1, newMachine(u.defaultUPS()), ret) })
+	put([]string{"[green]+ Add machine[-]"}, func() { u.editMachine(-1, newMachine(u.defaultUPS()), ret) })
 
 	first := row
 	for r := range actions {
@@ -249,7 +230,8 @@ func (u *ui) powerPlanView() (tview.Primitive, tview.Primitive) {
 			u.backToMenu()
 		}
 	})
-	help := "Everything this server does, per UPS. On battery, machines shut down as the charge drops.\nAfter an outage, they are woken as the battery recharges. Enter to edit, or add below."
+	help := "One row per machine. On battery, machines shut down in \"off order\" as the charge drops (highest % first).\n" +
+		"After an outage they are woken in \"wake order\" as the battery recharges (lowest % first). Enter to edit."
 	return frame("Power Plan", help, t), t
 }
 
@@ -319,6 +301,7 @@ func (u *ui) machineForm(idx int, d machineDraft, ret viewFunc) {
 	f.AddInputField("Name", m.Name, 24, nil, func(s string) { m.Name = strings.TrimSpace(s) })
 	u.addUPSField(f, m.UPS, func(s string) { m.UPS = strings.TrimSpace(s) })
 	if m.Type != MachineWakeOnly {
+		f.AddCheckbox("Shut down automatically", !m.SkipShutdown, func(b bool) { m.SkipShutdown = !b })
 		f.AddInputField("Shut down at battery %", strconv.Itoa(m.ShutdownAt), 4, tview.InputFieldInteger, func(s string) { m.ShutdownAt = atoi(s) })
 	}
 

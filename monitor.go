@@ -136,7 +136,7 @@ func handleAPIShutdowns(srv *ServerSettings, e upsEvent) {
 			delete(remoteStates, m.Name)
 			continue
 		}
-		if !e.reachedShutdown(m.ShutdownAt) {
+		if m.SkipShutdown || !e.reachedShutdown(m.ShutdownAt) {
 			continue
 		}
 

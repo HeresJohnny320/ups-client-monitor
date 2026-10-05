@@ -57,15 +57,17 @@ type NUTSettings struct {
 
 // Machine is anything the server powers off and/or wakes, tied to the UPS that feeds it.
 type Machine struct {
-	Name       string        `json:"name"`
-	Type       string        `json:"type"`
-	UPS        string        `json:"ups"`
-	ShutdownAt int           `json:"shutdown_at_percent,omitempty"` // shut down when on battery at or below this
-	Proxmox    *ProxmoxAPI   `json:"proxmox,omitempty"`
-	TrueNAS    *TrueNASAPI   `json:"truenas,omitempty"`
-	ClientKey  string        `json:"client_key,omitempty"`
-	Wake       *WakeSettings `json:"wake,omitempty"`
-	WebhookURL string        `json:"webhook_url,omitempty"` // overrides the server's default webhook
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	UPS        string `json:"ups"`
+	ShutdownAt int    `json:"shutdown_at_percent,omitempty"` // shut down when on battery at or below this
+	// SkipShutdown leaves the machine running during an outage (e.g. for maintenance); it is still woken afterwards.
+	SkipShutdown bool          `json:"skip_shutdown,omitempty"`
+	Proxmox      *ProxmoxAPI   `json:"proxmox,omitempty"`
+	TrueNAS      *TrueNASAPI   `json:"truenas,omitempty"`
+	ClientKey    string        `json:"client_key,omitempty"`
+	Wake         *WakeSettings `json:"wake,omitempty"`
+	WebhookURL   string        `json:"webhook_url,omitempty"` // overrides the server's default webhook
 }
 
 type ProxmoxAPI struct {
@@ -125,6 +127,9 @@ func (s *ServerSettings) testWebhook() string {
 
 // shutsDown reports whether the server powers this machine off (everything but wake_only).
 func (m Machine) shutsDown() bool { return m.Type != MachineWakeOnly }
+
+// autoShutdown reports whether the server will actually shut this machine down in an outage.
+func (m Machine) autoShutdown() bool { return m.shutsDown() && !m.SkipShutdown }
 
 // apiTarget adapts a Proxmox/TrueNAS machine to the remote shutdown code.
 func (m Machine) apiTarget() ShutdownTarget {
@@ -252,6 +257,7 @@ func normalizeSettings(s *Settings) {
 			}
 			if m.Type == MachineWakeOnly {
 				m.ShutdownAt = 0
+				m.SkipShutdown = false
 			}
 			if m.Wake != nil && strings.TrimSpace(m.Wake.MAC) == "" && m.Type != MachineWakeOnly {
 				m.Wake = nil

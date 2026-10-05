@@ -56,6 +56,7 @@ type linkMsg struct {
 	Charge     int    `json:"charge,omitempty"`
 	ChargeOK   bool   `json:"charge_known,omitempty"`
 	ShutdownAt int    `json:"shutdown_at,omitempty"`
+	Paused     bool   `json:"paused,omitempty"` // the server has this client's shutdown turned off
 }
 
 // systemShutdown is what a client runs when told to shut down (swapped out in tests).
@@ -427,7 +428,7 @@ func sendClientStatus(store *settingsStore, cc *clientConn) {
 	stateMu.Lock()
 	r, seen := upsReadings[target.UPS]
 	stateMu.Unlock()
-	m := linkMsg{Type: "status", UPS: target.UPS, ShutdownAt: target.ShutdownAt}
+	m := linkMsg{Type: "status", UPS: target.UPS, ShutdownAt: target.ShutdownAt, Paused: target.SkipShutdown}
 	if seen {
 		m.Status, m.Charge, m.ChargeOK = r.Status, r.Charge, r.ChargeKnown
 	}
@@ -451,7 +452,7 @@ func handleClientShutdowns(srv *ServerSettings, e upsEvent) {
 			delete(clientStates, c.Name)
 			continue
 		}
-		if !e.reachedShutdown(c.ShutdownAt) {
+		if c.SkipShutdown || !e.reachedShutdown(c.ShutdownAt) {
 			continue
 		}
 		s := clientStates[c.Name]
@@ -506,6 +507,7 @@ type clientLink struct {
 	lostAt        time.Time
 	lastOnBattery bool
 	shutdownAt    int
+	paused        bool
 	upsName       string
 	shutdownDone  bool
 }
@@ -632,7 +634,7 @@ func runClientLink(store *settingsStore, conf ClientSettings) {
 		case "status":
 			stateMu.Lock()
 			upsReadings[m.UPS] = upsReading{Status: m.Status, Charge: m.Charge, ChargeKnown: m.ChargeOK, Seen: time.Now()}
-			link.upsName, link.shutdownAt = m.UPS, m.ShutdownAt
+			link.upsName, link.shutdownAt, link.paused = m.UPS, m.ShutdownAt, m.Paused
 			link.lastOnBattery = isOnBatteryStatus(m.Status)
 			if !link.lastOnBattery {
 				link.shutdownDone = false

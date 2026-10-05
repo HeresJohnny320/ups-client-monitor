@@ -287,6 +287,9 @@ func statusSnapshot(s Settings) StatusInfo {
 			st.NutError = "not paired yet"
 		}
 		state := "waiting for the server's order"
+		if link.paused {
+			state = "turned off on the server (left running in an outage)"
+		}
 		if link.shutdownDone {
 			state = "shutting down"
 		}
@@ -301,10 +304,12 @@ func statusSnapshot(s Settings) StatusInfo {
 			if m.Wake != nil {
 				mi.WakeAt = m.Wake.AtPercent
 			}
-			switch m.Type {
-			case MachineClient:
+			switch {
+			case m.shutsDown() && m.SkipShutdown:
+				mi.ShutdownState = "off (left running in an outage)"
+			case m.Type == MachineClient:
 				mi.ShutdownState = clientLinkState(m.Name)
-			case MachineProxmox, MachineTrueNAS:
+			case m.Type == MachineProxmox || m.Type == MachineTrueNAS:
 				mi.ShutdownState = "armed"
 				if r := remoteStates[m.Name]; r != nil {
 					switch {

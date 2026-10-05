@@ -84,6 +84,7 @@ function upsmon_machine_from_post($old) {
 		'type' => $type,
 		'ups' => upsmon_post('ups'),
 		'shutdown_at_percent' => (int)upsmon_post('shutdown_at'),
+		'skip_shutdown' => $type !== 'wake_only' && empty($_POST['auto_shutdown']),
 		'webhook_url' => upsmon_post('webhook'),
 	);
 	if ($type === 'proxmox') {
@@ -196,6 +197,17 @@ if ($_POST && !$down) {
 			$input_errors[] = 'Wake-on-LAN failed: ' . $r['error'];
 		} else {
 			$savemsg = $r['info'] . '.';
+		}
+		break;
+
+	case 'toggle_shutdown':
+		if (isset($machines[$idx]) && $machines[$idx]['type'] !== 'wake_only') {
+			$new = $s;
+			$off = empty($machines[$idx]['skip_shutdown']);
+			$new['server']['machines'][$idx]['skip_shutdown'] = $off;
+			if (upsmon_save($new, $machines[$idx]['name'] . ($off ? ': automatic shutdown turned off (it stays on in an outage);' : ': automatic shutdown turned on;'))) {
+				$s = $new;
+			}
 		}
 		break;
 
@@ -443,6 +455,71 @@ if ($tab === 'status') {
 }
 
 /* ----- Power plan ----- */
+
+function upsmon_auto_shutdown($m) {
+	return $m['type'] !== 'wake_only' && empty($m['skip_shutdown']);
+}
+
+/* 1, 2, 3... by percentage (highest first when $desc); equal percentages share a place. */
+function upsmon_dense_ranks($pcts, $desc) {
+	$u = array_values(array_unique($pcts));
+	if ($desc) {
+		rsort($u);
+	} else {
+		sort($u);
+	}
+	$ranks = array();
+	foreach ($u as $i => $p) {
+		$ranks[$p] = $i + 1;
+	}
+	return $ranks;
+}
+
+function upsmon_ordinal($n) {
+	$suffix = 'th';
+	if ($n % 100 < 11 || $n % 100 > 13) {
+		$suffix = array(1 => 'st', 2 => 'nd', 3 => 'rd')[$n % 10] ?? 'th';
+	}
+	return $n . $suffix;
+}
+
+/*
+ * The machines on one UPS in shutdown order, with each one's place in the shutdown order
+ * and the wake order. Same rules as the monitor's powerPlan(): machines left running come
+ * after those that shut down, then wake-only machines.
+ */
+function upsmon_plan_rows($machines, $ups) {
+	$rows = array();
+	$shut = array();
+	$wake = array();
+	foreach ($machines as $i => $m) {
+		if ($m['ups'] !== $ups) {
+			continue;
+		}
+		$rows[] = array('i' => $i, 'm' => $m);
+		if (upsmon_auto_shutdown($m)) {
+			$shut[] = (int)$m['shutdown_at_percent'];
+		}
+		if (!empty($m['wake'])) {
+			$wake[] = (int)$m['wake']['at_percent'];
+		}
+	}
+	$shut_rank = upsmon_dense_ranks($shut, true);
+	$wake_rank = upsmon_dense_ranks($wake, false);
+	foreach ($rows as &$r) {
+		$m = $r['m'];
+		$r['off'] = upsmon_auto_shutdown($m) ? $shut_rank[(int)$m['shutdown_at_percent']] : 0;
+		$r['on'] = !empty($m['wake']) ? $wake_rank[(int)$m['wake']['at_percent']] : 0;
+		$r['group'] = upsmon_auto_shutdown($m) ? 0 : ($m['type'] !== 'wake_only' ? 1 : 2);
+	}
+	unset($r);
+	usort($rows, function ($a, $b) {
+		return array($a['group'], $a['off'], $a['on'] === 0 ? 1 : 0, $a['on'], $a['m']['name']) <=>
+			array($b['group'], $b['off'], $b['on'] === 0 ? 1 : 0, $b['on'], $b['m']['name']);
+	});
+	return $rows;
+}
+
 if ($tab === 'plan') {
 	if ($role !== 'server') {
 		print_info_box('The power plan belongs to the server. This firewall is set up as a ' . upsmon_h($role ?: 'nothing yet') . '.', 'info');
@@ -457,47 +534,38 @@ if ($tab === 'plan') {
 		foreach ($ups_names as $ups) {
 			$state = isset($live[$ups]) ? upsmon_power_label($live[$ups]['status']) . ' ' .
 				(!empty($live[$ups]['charge_known']) ? (int)$live[$ups]['charge'] . '%' : '') : '<span class="text-muted">not seen on NUT yet</span>';
-			$down_steps = array();
-			$up_steps = array();
-			$no_wake = array();
-			foreach ($machines as $i => $m) {
-				if ($m['ups'] !== $ups) {
-					continue;
-				}
-				$link = '<a href="ups_monitor.php?tab=machines&amp;edit=' . $i . '">' . upsmon_h($m['name']) . '</a>';
-				if ($m['type'] !== 'wake_only') {
-					$down_steps[] = array((int)$m['shutdown_at_percent'], $link, $upsmon_types[$m['type']]);
-					if (empty($m['wake'])) {
-						$no_wake[] = $link;
-					}
-				}
-				if (!empty($m['wake'])) {
-					$up_steps[] = array((int)$m['wake']['at_percent'], $link, upsmon_h($m['wake']['mac']));
-				}
-			}
-			usort($down_steps, function ($a, $b) { return $b[0] - $a[0]; });
-			usort($up_steps, function ($a, $b) { return $a[0] - $b[0]; });
+			$rows = upsmon_plan_rows($machines, $ups);
 
 			upsmon_box_open('UPS ' . $ups);
-			echo '<p>' . $state . '</p><div class="row"><div class="col-sm-6"><h4>On battery, as the charge drops</h4>';
-			echo '<table class="table table-condensed">';
-			foreach ($down_steps as $d) {
-				echo '<tr><td style="width:90px">≤ ' . $d[0] . '%</td><td>shut down ' . $d[1] . '</td><td class="text-muted">' . upsmon_h($d[2]) . '</td></tr>';
+			echo '<p>' . $state . '</p>';
+			if (!$rows) {
+				echo '<p class="text-muted">No machines on this UPS.</p>';
+				upsmon_box_close();
+				continue;
 			}
-			echo $down_steps ? '' : '<tr><td class="text-muted">Nothing is shut down.</td></tr>';
-			echo '</table></div><div class="col-sm-6"><h4>Power back, as the battery recharges</h4><table class="table table-condensed">';
-			foreach ($up_steps as $w) {
-				echo '<tr><td style="width:90px">≥ ' . $w[0] . '%</td><td>wake ' . $w[1] . '</td><td class="text-muted">' . $w[2] . '</td></tr>';
+			echo '<div class="table-responsive"><table class="table table-striped table-hover table-condensed"><thead><tr>' .
+				'<th>Off order</th><th>Machine</th><th>Type</th><th>Shuts down at</th><th>Wake order</th><th>Wakes at</th></tr></thead><tbody>';
+			foreach ($rows as $r) {
+				$m = $r['m'];
+				if ($m['type'] === 'wake_only') {
+					$off_at = '<span class="text-muted">never (wake only)</span>';
+				} elseif (!empty($m['skip_shutdown'])) {
+					$off_at = '<span class="label label-warning">off</span> <span class="text-muted">left running</span>';
+				} else {
+					$off_at = '≤ ' . (int)$m['shutdown_at_percent'] . '%';
+				}
+				$wake_at = $r['on'] ? '≥ ' . (int)$m['wake']['at_percent'] . '%' : '<span class="text-warning">not woken (no MAC)</span>';
+				echo '<tr><td>' . ($r['off'] ? upsmon_ordinal($r['off']) : '—') . '</td>' .
+					'<td><a href="ups_monitor.php?tab=machines&amp;edit=' . $r['i'] . '">' . upsmon_h($m['name']) . '</a></td>' .
+					'<td class="text-muted">' . upsmon_h($upsmon_types[$m['type']] ?? $m['type']) . '</td>' .
+					'<td>' . $off_at . '</td><td>' . ($r['on'] ? upsmon_ordinal($r['on']) : '—') . '</td><td>' . $wake_at . '</td></tr>';
 			}
-			echo $up_steps ? '' : '<tr><td class="text-muted">Nothing is woken.</td></tr>';
-			echo '</table></div></div>';
-			foreach ($no_wake as $n) {
-				echo '<p class="text-warning">' . $n . ' has no Wake-on-LAN MAC, so it stays off after an outage.</p>';
-			}
+			echo '</tbody></table></div>';
 			upsmon_box_close();
 		}
-		echo '<p>Machines only wake after a power event (their UPS went on battery, or the monitor restarted). ' .
-			'Once the UPS is back on mains and at the wake level, three packets are sent five minutes apart.</p>';
+		echo '<p>On battery, machines shut down in <b>off order</b> as the charge drops (highest % first). After an outage they are woken in ' .
+			'<b>wake order</b> as the battery recharges (lowest % first). Machines only wake after a power event (their UPS went on battery, ' .
+			'or the monitor restarted); three packets are sent five minutes apart.</p>';
 	}
 }
 
@@ -515,11 +583,24 @@ if ($tab === 'machines') {
 		echo '<div class="table-responsive"><table class="table table-striped table-hover table-condensed"><thead><tr>' .
 			'<th>Name</th><th>Type</th><th>UPS</th><th>Off at</th><th>On at</th><th>State</th><th></th></tr></thead><tbody>';
 		foreach ($machines as $i => $m) {
-			$off = $m['type'] === 'wake_only' ? '—' : '≤ ' . (int)$m['shutdown_at_percent'] . '%';
+			if ($m['type'] === 'wake_only') {
+				$off = '—';
+			} elseif (!empty($m['skip_shutdown'])) {
+				$off = '<span class="label label-warning">off</span>';
+			} else {
+				$off = '≤ ' . (int)$m['shutdown_at_percent'] . '%';
+			}
 			$on = empty($m['wake']) ? '—' : '≥ ' . (int)$m['wake']['at_percent'] . '%';
 			echo '<tr><td>' . upsmon_h($m['name']) . '</td><td>' . upsmon_h($upsmon_types[$m['type']] ?? $m['type']) . '</td><td>' .
 				upsmon_h($m['ups']) . '</td><td>' . $off . '</td><td>' . $on . '</td><td>' . upsmon_h($live[$m['name']]['shutdown_state'] ?? '') . '</td>' .
 				'<td style="white-space:nowrap"><a class="btn btn-xs btn-info" href="ups_monitor.php?tab=machines&amp;edit=' . $i . '">Edit</a> ';
+			if ($m['type'] !== 'wake_only') {
+				$is_off = !empty($m['skip_shutdown']);
+				echo '<form method="post" style="display:inline"><input type="hidden" name="tab" value="machines"><input type="hidden" name="act" value="toggle_shutdown">' .
+					'<input type="hidden" name="idx" value="' . $i . '"><button class="btn btn-xs ' . ($is_off ? 'btn-success' : 'btn-warning') . '" title="' .
+					($is_off ? 'Shut it down automatically again' : 'Leave it running during an outage') . '">' .
+					($is_off ? 'Turn shutdown on' : 'Turn shutdown off') . '</button></form> ';
+			}
 			if ($m['type'] === 'client') {
 				echo '<form method="post" style="display:inline"><input type="hidden" name="tab" value="machines"><input type="hidden" name="act" value="pairing">' .
 					'<input type="hidden" name="name" value="' . upsmon_h($m['name']) . '"><button class="btn btn-xs btn-default">Pairing code</button></form> ';
@@ -551,8 +632,12 @@ if ($tab === 'machines') {
 		upsmon_row('Name', upsmon_input('name', $m['name'] ?? ''), 'Any name you like. A client uses it to identify itself, so renaming a client means pairing it again.');
 		upsmon_row('UPS', upsmon_input('ups', $m['ups'] ?? '', 'text', 'list="upsmon-ups"'),
 			'The UPS that powers it' . ($ups_names ? ' (' . upsmon_h(implode(', ', $ups_names)) . ')' : '') . '.');
+		echo '<div id="upsmon-shutdown">';
+		upsmon_row('', upsmon_check('auto_shutdown', empty($m['skip_shutdown']), 'Shut down automatically'),
+			'Untick to leave it running during an outage (e.g. while you work on it). It is still woken afterwards.');
 		upsmon_row('Shut down at', upsmon_input('shutdown_at', $m['shutdown_at_percent'] ?? 50, 'number', 'min="0" max="100"'),
-			'Battery % at which it is shut down while on battery. NUT\'s low-battery signal also triggers it.', 'upsmon-shutdown');
+			'Battery % at which it is shut down while on battery. NUT\'s low-battery signal also triggers it.');
+		echo '</div>';
 
 		echo '<div class="upsmon-type upsmon-type-proxmox">';
 		upsmon_row('Host', upsmon_input('px_host', $px['host'] ?? '', 'text', 'placeholder="https://192.168.1.10:8006"'));
