@@ -153,16 +153,18 @@ Every shutdown is a normal, clean shutdown, the same as choosing Shut Down from 
 
 ### On client PCs
 
-When the server orders a shutdown (or the client's safety net kicks in), the client runs one command:
+When the server orders a shutdown (or the client's safety net kicks in), the client shuts its own system down. It tries these in order and uses the first that works, skipping any that aren't installed:
 
-| System | Command |
+| System | Commands, in order |
 |---|---|
 | Windows | `shutdown /s /t 0` |
-| macOS | `osascript -e 'tell app "System Events" to shut down'` |
-| Linux | `shutdown -h now` |
-| Linux with TrueNAS's `midclt` | `midclt call system.shutdown "UPS battery low"` |
+| macOS | `osascript -e 'tell app "System Events" to shut down'` (needs someone logged in), then `shutdown -h now` |
+| Linux | `midclt call system.shutdown` (TrueNAS SCALE only), then `shutdown -h now`, then `poweroff` (minimal systems like Alpine) |
+| FreeBSD, e.g. OPNsense or TrueNAS CORE | `midclt call system.shutdown` (TrueNAS CORE only), then `shutdown -p now` |
+| OpenBSD, NetBSD, DragonFly | `shutdown -p now` |
+| illumos and Solaris, e.g. OmniOS, SmartOS, OpenIndiana | `shutdown -y -g0 -i5` |
 
-That's the only thing a client will ever run, and only when its own paired server asks. The server can't make it run anything else. FreeBSD isn't supported as a client yet.
+That's the only thing a client will ever run, and only when its own paired server asks. The server can't make it run anything else.
 
 ### On Proxmox
 
@@ -360,6 +362,14 @@ Save this as `~/Library/LaunchAgents/com.upsmonitor.plist`:
 
 Then load it with `launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist`.
 
+### Other systems
+
+On the BSDs, illumos and Solaris, start it at boot the same way you'd start any other background program, and include the `-daemon` option. For example, on OpenBSD or NetBSD you'd add this line to `/etc/rc.local`:
+
+```sh
+/usr/local/bin/ups-monitor -daemon &
+```
+
 ## Command-line options
 
 | Option | What it does |
@@ -374,7 +384,14 @@ Then load it with `launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist`.
 
 Every push to `main` gets tested on Linux, Windows and macOS and published as an alpha pre-release (`alpha-1`, `alpha-2`, …). Those haven't been tested on real hardware, so give them a dry run first. Tagged versions like `v1.0.0` are published as normal releases. `ups-monitor -version` tells you which one you're running.
 
-There are builds for Linux (x86-64, plus arm64, armv7 and armv6 for Raspberry Pis), Windows (x64 and ARM), macOS (Intel and Apple Silicon) and FreeBSD (amd64 and arm64, which is what pfSense uses).
+There are builds for:
+
+- **Linux**: x86-64, 32-bit x86, arm64, armv7 and armv6 (Raspberry Pis), and RISC-V
+- **Windows**: x64, 32-bit and ARM
+- **macOS**: Intel and Apple Silicon
+- **FreeBSD**: amd64 and arm64 (what pfSense, OPNsense and TrueNAS CORE use)
+- **OpenBSD** and **NetBSD**: amd64 and arm64
+- **DragonFly BSD**, **illumos** and **Solaris**: amd64
 
 To build it yourself you need Go:
 

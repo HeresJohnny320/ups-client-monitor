@@ -313,20 +313,51 @@ func shutdownSystem() error {
 		log.Println("[DRY RUN] Would shut down this machine now (UPS_MONITOR_DRY_RUN=1).")
 		return nil
 	}
-	switch runtime.GOOS {
-	case "windows":
-		return exec.Command("shutdown", "/s", "/t", "0").Run()
-	case "darwin":
-		return exec.Command("osascript", "-e", "tell app \"System Events\" to shut down").Run()
-	case "linux":
-		if _, err := exec.LookPath("midclt"); err == nil {
-			// TrueNAS 25.04+ requires a reason argument; older releases reject it.
-			if err := exec.Command("midclt", "call", "system.shutdown", "UPS battery low").Run(); err == nil {
-				return nil
-			}
-			return exec.Command("midclt", "call", "system.shutdown").Run()
-		}
-		return exec.Command("shutdown", "-h", "now").Run()
+	cmds := shutdownCommands(runtime.GOOS)
+	if len(cmds) == 0 {
+		return fmt.Errorf("shutdown not supported on %s", runtime.GOOS)
 	}
-	return fmt.Errorf("shutdown not supported on %s", runtime.GOOS)
+	var failed []string
+	for _, c := range cmds {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue // not installed here (e.g. midclt outside TrueNAS)
+		}
+		err := exec.Command(c[0], c[1:]...).Run()
+		if err == nil {
+			return nil
+		}
+		failed = append(failed, strings.Join(c, " ")+": "+err.Error())
+	}
+	if len(failed) == 0 {
+		return fmt.Errorf("no shutdown command found on this %s system", runtime.GOOS)
+	}
+	return fmt.Errorf("every shutdown command failed (%s)", strings.Join(failed, "; "))
+}
+
+// shutdownCommands lists the ways to cleanly power off an OS, best first. Each is tried
+// in turn; ones that aren't installed are skipped.
+func shutdownCommands(goos string) [][]string {
+	// TrueNAS SCALE (Linux) and CORE (FreeBSD) want their own middleware to shut down.
+	// 25.04+ requires a reason argument; older releases reject it, so try both.
+	truenas := [][]string{
+		{"midclt", "call", "system.shutdown", "UPS battery low"},
+		{"midclt", "call", "system.shutdown"},
+	}
+	switch goos {
+	case "windows":
+		return [][]string{{"shutdown", "/s", "/t", "0"}}
+	case "darwin":
+		// osascript needs a logged-in user; a background service falls back to shutdown.
+		return [][]string{{"osascript", "-e", `tell app "System Events" to shut down`}, {"shutdown", "-h", "now"}}
+	case "linux":
+		// poweroff covers minimal systems (e.g. Alpine/BusyBox) without a shutdown command.
+		return append(truenas, []string{"shutdown", "-h", "now"}, []string{"poweroff"})
+	case "freebsd":
+		return append(truenas, []string{"shutdown", "-p", "now"})
+	case "openbsd", "netbsd", "dragonfly":
+		return [][]string{{"shutdown", "-p", "now"}}
+	case "illumos", "solaris":
+		return [][]string{{"shutdown", "-y", "-g0", "-i5"}}
+	}
+	return nil
 }

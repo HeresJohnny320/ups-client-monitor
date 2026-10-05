@@ -79,14 +79,26 @@ jobs:
           - { name: linux-armv7, goos: linux, goarch: arm, goarm: "7" }
           # Raspberry Pi Zero / Pi 1
           - { name: linux-armv6, goos: linux, goarch: arm, goarm: "6" }
+          # Older 32-bit PCs
+          - { name: linux-386, goos: linux, goarch: "386" }
+          - { name: linux-riscv64, goos: linux, goarch: riscv64 }
           - { name: windows-amd64, goos: windows, goarch: amd64, ext: .exe }
           - { name: windows-arm64, goos: windows, goarch: arm64, ext: .exe }
+          - { name: windows-386, goos: windows, goarch: "386", ext: .exe }
           - { name: darwin-amd64, goos: darwin, goarch: amd64 }
           - { name: darwin-arm64, goos: darwin, goarch: arm64 }
           # pfSense, OPNsense, TrueNAS CORE
           - { name: freebsd-amd64, goos: freebsd, goarch: amd64 }
           # pfSense Plus on Netgate ARM appliances (1100, 2100)
           - { name: freebsd-arm64, goos: freebsd, goarch: arm64 }
+          # Other BSDs and illumos/Solaris (OmniOS, SmartOS, OpenIndiana)
+          - { name: openbsd-amd64, goos: openbsd, goarch: amd64 }
+          - { name: openbsd-arm64, goos: openbsd, goarch: arm64 }
+          - { name: netbsd-amd64, goos: netbsd, goarch: amd64 }
+          - { name: netbsd-arm64, goos: netbsd, goarch: arm64 }
+          - { name: dragonfly-amd64, goos: dragonfly, goarch: amd64 }
+          - { name: illumos-amd64, goos: illumos, goarch: amd64 }
+          - { name: solaris-amd64, goos: solaris, goarch: amd64 }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
