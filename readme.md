@@ -147,6 +147,81 @@ Go to **Settings (top-right menu) → API Keys → Add**, pick a user such as `t
 
 The host has to start with `https://`. TrueNAS revokes any API key that's sent over plain HTTP, so the app refuses to try. It talks to the WebSocket API that TrueNAS 25.04 and later use (TrueNAS 26 dropped the old REST API).
 
+## What it actually runs
+
+Every shutdown is a normal, clean shutdown, the same as choosing Shut Down from the menu yourself. Nothing is ever just switched off.
+
+### On client PCs
+
+When the server orders a shutdown (or the client's safety net kicks in), the client runs one command:
+
+| System | Command |
+|---|---|
+| Windows | `shutdown /s /t 0` |
+| macOS | `osascript -e 'tell app "System Events" to shut down'` |
+| Linux | `shutdown -h now` |
+| Linux with TrueNAS's `midclt` | `midclt call system.shutdown "UPS battery low"` |
+
+That's the only thing a client will ever run, and only when its own paired server asks. The server can't make it run anything else. FreeBSD isn't supported as a client yet.
+
+### On Proxmox
+
+Nothing is installed on the Proxmox host. The server sends one HTTPS request:
+
+```
+POST https://<host>:8006/api2/json/nodes/<node>/status
+Authorization: PVEAPIToken=<your token>
+command=shutdown
+```
+
+That's the same as clicking **Shutdown** on the node, or running `pvesh create /nodes/<node>/status --command shutdown`. Proxmox shuts down its VMs and containers first, in their shutdown order, and then the host. **Test connection** only asks for the Proxmox version (`GET /api2/json/version`), which changes nothing.
+
+### On TrueNAS
+
+Nothing is installed on TrueNAS either. The server connects to its API at `wss://<host>/api/current` and makes two calls: `auth.login_ex` to log in with your API key, then `system.shutdown` with a reason like `"UPS ups1 on battery (OB DISCHRG), charge 25%"`, which ends up in TrueNAS's logs. That's the same as **Power → Shut Down** in the TrueNAS UI. **Test connection** only logs in.
+
+### Everything else
+
+- **Battery self-tests** send NUT the instant command `test.battery.start.quick` or `test.battery.start.deep`, or `test.battery.start` on UPSes that only have that one.
+- **Wake-on-LAN** sends a standard magic packet (UDP port 9) to the broadcast address of each private network the server is on, or to the broadcast address you set for that machine.
+
+## When a shutdown hangs
+
+Most shutdowns take seconds. The usual exceptions are a VM that won't stop and Windows waiting on something. During an outage nobody's there to help, so it's worth setting these up once.
+
+### A VM that takes forever (Proxmox)
+
+**Give every VM a shutdown time limit.** On the VM, go to **Options → Start/Shutdown order** and set **Shutdown timeout**, for example 180 seconds. When the host shuts down, Proxmox gives the VM that long to stop on its own and then force-stops it, so one stuck VM can't hold everything up until the battery dies. From the Proxmox shell:
+
+```sh
+qm set <vmid> --startup down=180
+```
+
+**Install the QEMU guest agent in your VMs.** Then Proxmox can ask the guest to shut down through the agent, which is much more reliable than the virtual power button, especially for Windows. Install `qemu-guest-agent` on Linux, or the VirtIO drivers and guest agent from the [virtio-win ISO](https://pve.proxmox.com/wiki/Windows_VirtIO_Drivers) on Windows. Then tick **Options → QEMU Guest Agent** on the VM, or:
+
+```sh
+qm set <vmid> --agent enabled=1
+```
+
+**Leave enough battery for it.** Set the Proxmox host's "shut down at" level high enough that the battery lasts the slowest VM's timeout plus the host's own shutdown. If a VM can take three minutes, the UPS should still have well over three minutes left at that level.
+
+### Windows (VMs and PCs)
+
+**Windows Server ignores the power button when nobody's logged in** unless you allow it. In **Local Security Policy → Local Policies → Security Options**, enable **"Shutdown: Allow system to be shut down without having to log on"**. Also check that **Power Options → "When I press the power button"** is set to **Shut down**.
+
+**Stop Windows waiting on programs.** By default Windows waits for apps that are busy or have unsaved work, and may sit on "This app is preventing shutdown" forever. These settings make it close them after five seconds instead. Run them in an admin Command Prompt:
+
+```bat
+reg add "HKCU\Control Panel\Desktop" /v AutoEndTasks /t REG_SZ /d 1 /f
+reg add "HKCU\Control Panel\Desktop" /v WaitToKillAppTimeout /t REG_SZ /d 5000 /f
+reg add "HKCU\Control Panel\Desktop" /v HungAppTimeout /t REG_SZ /d 5000 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control" /v WaitToKillServiceTimeout /t REG_SZ /d 5000 /f
+```
+
+The first three apply to the user who runs them, so run them as the account that's normally logged in. Anything left unsaved is lost when Windows closes it.
+
+**Don't leave Windows Update pending.** Updates that install during shutdown ("Working on updates, don't turn off your computer") are the most common reason a Windows shutdown takes ages. Install them on your own schedule, so they aren't waiting for the next power cut.
+
 ## Client safety net
 
 If a client loses contact with the server while its UPS is on battery (say the network switch wasn't on the UPS), it waits 60 seconds and then shuts itself down. You can change the delay under General on the client, or set it to 0 to turn this off.
