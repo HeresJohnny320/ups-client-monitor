@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,7 @@ type linkMsg struct {
 	ID         string `json:"id,omitempty"`
 	Key        string `json:"key,omitempty"`
 	Hostname   string `json:"hostname,omitempty"`
+	Version    string `json:"version,omitempty"` // hello: the client's version
 	Error      string `json:"error,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	UPS        string `json:"ups,omitempty"`
@@ -174,12 +176,15 @@ func newLinkScanner(conn net.Conn) *bufio.Scanner {
 // ---------- Server side ----------
 
 type clientConn struct {
-	name  string
-	key   string
-	addr  string
-	since time.Time
-	conn  net.Conn
-	wmu   sync.Mutex
+	name     string
+	key      string
+	addr     string
+	hostname string
+	version  string // empty for clients older than the version field
+	since    time.Time
+	lastSeen atomic.Int64 // unix nanoseconds of the last message from the client
+	conn     net.Conn
+	wmu      sync.Mutex
 }
 
 func (c *clientConn) send(m linkMsg) error { return writeLinkMsg(c.conn, &c.wmu, m) }
@@ -336,7 +341,9 @@ func (h *linkHub) serve(store *settingsStore, raw net.Conn) {
 	}
 
 	webhook := srv.webhookFor(target)
-	cc := &clientConn{name: target.Name, key: target.ClientKey, addr: remote, since: time.Now(), conn: conn}
+	cc := &clientConn{name: target.Name, key: target.ClientKey, addr: remote, hostname: hello.Hostname,
+		version: hello.Version, since: time.Now(), conn: conn}
+	cc.lastSeen.Store(time.Now().UnixNano())
 	h.mu.Lock()
 	if old := h.conns[cc.name]; old != nil {
 		old.conn.Close()
@@ -378,6 +385,7 @@ func (h *linkHub) serve(store *settingsStore, raw net.Conn) {
 		if !sc.Scan() {
 			return
 		}
+		cc.lastSeen.Store(time.Now().UnixNano())
 		var m linkMsg
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
@@ -480,6 +488,30 @@ func handleClientShutdowns(srv *ServerSettings, e upsEvent) {
 	}
 }
 
+// describeClient reports a client's connection for "Check clients": where it connects from,
+// what it runs and when it was last heard from. ok is false when it isn't connected.
+func describeClient(name string) (string, bool) {
+	c := hub.get(name)
+	if c == nil {
+		return "", false
+	}
+	ver := c.version
+	if ver == "" {
+		ver = "an older version, update it to see"
+	}
+	host := c.hostname
+	if host == "" {
+		host = "unknown name"
+	}
+	addr := c.addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		addr = h // the client's outgoing port means nothing to people
+	}
+	heard := time.Since(time.Unix(0, c.lastSeen.Load())).Round(time.Second)
+	return fmt.Sprintf("connected from %s (%s, version %s) for %s, last heard from %s ago",
+		addr, host, ver, time.Since(c.since).Round(time.Second), heard), true
+}
+
 // clientLinkState describes a linked client for the server's status screen.
 func clientLinkState(name string) string {
 	if s := clientStates[name]; s != nil {
@@ -559,7 +591,7 @@ func dialServer(conf ClientSettings) (net.Conn, error) {
 	}
 	host, _ := os.Hostname()
 	var mu sync.Mutex
-	if err := writeLinkMsg(conn, &mu, linkMsg{Type: "hello", ID: conf.Name, Key: conf.Key, Hostname: host}); err != nil {
+	if err := writeLinkMsg(conn, &mu, linkMsg{Type: "hello", ID: conf.Name, Key: conf.Key, Hostname: host, Version: version}); err != nil {
 		conn.Close()
 		return nil, err
 	}

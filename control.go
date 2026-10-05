@@ -250,6 +250,8 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			go testAllWebhooks(s)
 		case "check-targets":
 			go checkShutdownTargets(s)
+		case "check-clients":
+			go checkClients(s)
 		default:
 			return ctlResponse{Error: "unknown action " + req.Action}
 		}

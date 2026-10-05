@@ -283,7 +283,8 @@ if ($_POST && !$down) {
 		break;
 
 	case 'action':
-		$names = array('test' => 'Quick self-test', 'test-long' => 'Deep self-test', 'check-targets' => 'Login check', 'test-webhook' => 'Webhook test');
+		$names = array('test' => 'Quick self-test', 'test-long' => 'Deep self-test', 'check-targets' => 'Login check',
+			'check-clients' => 'Client check', 'test-webhook' => 'Webhook test');
 		$a = upsmon_post('action');
 		$r = upsmon_call(array('cmd' => 'action', 'action' => $a));
 		if (empty($r['ok'])) {
@@ -424,6 +425,7 @@ if ($tab === 'status') {
 		echo '<button class="btn btn-default btn-sm" name="action" value="test">Quick self-test now</button> ';
 		echo '<button class="btn btn-default btn-sm" name="action" value="test-long">Deep self-test now</button> ';
 		echo '<button class="btn btn-default btn-sm" name="action" value="check-targets">Check Proxmox / TrueNAS logins</button> ';
+		echo '<button class="btn btn-default btn-sm" name="action" value="check-clients">Check clients</button> ';
 	}
 	echo '<button class="btn btn-default btn-sm" name="action" value="test-webhook">Send test webhooks</button>';
 	echo '</form>';

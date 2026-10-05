@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -156,5 +159,41 @@ func TestPairingCodeRoundTrip(t *testing.T) {
 	}
 	if _, _, _, _, err := parsePairingCode("https://example.com"); err == nil {
 		t.Error("expected error for a non-pairing URL")
+	}
+}
+
+func TestCheckClients(t *testing.T) {
+	key := newClientKey()
+	srv, code := startTestServer(t, key)
+	srv.s.Server.Machines = append(srv.s.Server.Machines,
+		Machine{Name: "laptop", Type: MachineClient, UPS: "ups1", ShutdownAt: 20, ClientKey: newClientKey(), SkipShutdown: true})
+
+	cli := clientSettingsFromCode(t, code)
+	cliStore := &settingsStore{
+		s:       Settings{Version: settingsVersion, Role: "client", Client: &cli},
+		path:    filepath.Join(t.TempDir(), "settings.json"),
+		changed: make(chan struct{}, 1),
+	}
+	go runClientLink(cliStore, cli)
+	waitFor(t, "client to connect", func() bool { return hub.get("desk") != nil })
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	checkClients(srv.Get())
+	log.SetOutput(os.Stderr)
+	out := buf.String()
+
+	host, _ := os.Hostname()
+	for _, want := range []string{
+		"desk (client): OK, connected from 127.0.0.1",
+		"(" + host + ", version " + version + ")",
+		"Shuts down at 30% on ups1.",
+		"laptop (client): NOT CONNECTED",
+		"reach this server on TCP",
+		"Automatic shutdown is turned off for it.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("check output is missing %q:\n%s", want, out)
+		}
 	}
 }

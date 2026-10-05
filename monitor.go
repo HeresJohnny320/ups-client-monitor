@@ -374,6 +374,33 @@ func testAllWebhooks(s Settings) {
 	log.Println("[SUCCESS] Webhook test commands sent.")
 }
 
+// checkClients reports each paired client's connection, for the "Check clients" action.
+func checkClients(s Settings) {
+	if !s.isServer() {
+		return
+	}
+	checked := 0
+	for _, m := range s.Server.Machines {
+		if m.Type != MachineClient {
+			continue
+		}
+		checked++
+		note := ""
+		if m.SkipShutdown {
+			note = " Automatic shutdown is turned off for it."
+		}
+		if info, ok := describeClient(m.Name); ok {
+			log.Printf("[CHECK] %s (client): OK, %s. Shuts down at %d%% on %s.%s", m.Name, info, m.ShutdownAt, m.UPS, note)
+			continue
+		}
+		log.Printf("[CHECK] %s (client): NOT CONNECTED. Make sure ups-monitor runs on it in client mode with this server's pairing code, "+
+			"and that it can reach this server on TCP %d.%s", m.Name, s.Server.ListenPort, note)
+	}
+	if checked == 0 {
+		log.Println("[INFO] No client machines configured.")
+	}
+}
+
 // checkShutdownTargets logs in to every Proxmox/TrueNAS machine without shutting it down.
 func checkShutdownTargets(s Settings) {
 	if !s.isServer() {

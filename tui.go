@@ -573,6 +573,7 @@ func (u *ui) actionsView() (tview.Primitive, tview.Primitive) {
 		l.AddItem("Run quick self-test now", "Starts a quick battery test on every UPS in UPS Self-Tests", 0, run("test", "Quick self-test"))
 		l.AddItem("Run deep self-test now", "Runs the battery down further; takes longer", 0, run("test-long", "Deep self-test"))
 		l.AddItem("Check Proxmox / TrueNAS logins", "Logs in to each one without shutting it down", 0, run("check-targets", "Login check"))
+		l.AddItem("Check clients", "Shows whether each paired PC is connected, from where, and which version it runs", 0, run("check-clients", "Client check"))
 	}
 	l.AddItem("Send test webhooks", "Posts a test message to every configured Discord webhook", 0, run("test-webhook", "Webhook test"))
 	l.SetDoneFunc(u.backToMenu)
