@@ -376,17 +376,30 @@ func checkProxmoxToken(name, tok string) error {
 		"It's the token ID and its secret joined with \"=\"", name)
 }
 
-// checkEdits catches mistakes in settings that are being saved. It only runs when saving,
-// never when loading, so an existing settings file can't stop the monitor from starting.
-func checkEdits(s *Settings) error {
+// checkEdits catches mistakes in settings that are being saved. It only looks at values that
+// are new or changed compared with old, so one machine with an old mistake doesn't block
+// fixing or editing another. It never runs on load, so a settings file can't stop startup.
+func checkEdits(old, s *Settings) error {
 	if !s.isServer() {
 		return nil
 	}
-	for _, m := range s.Server.Machines {
-		if m.Type == MachineProxmox && m.Proxmox != nil {
-			if err := checkProxmoxToken(m.Name, m.Proxmox.Token); err != nil {
-				return err
+	saved := map[string]string{}
+	if old.Server != nil {
+		for _, m := range old.Server.Machines {
+			if m.Proxmox != nil {
+				saved[m.Name] = m.Proxmox.Token
 			}
+		}
+	}
+	for _, m := range s.Server.Machines {
+		if m.Type != MachineProxmox || m.Proxmox == nil {
+			continue
+		}
+		if tok, ok := saved[m.Name]; ok && tok == m.Proxmox.Token {
+			continue // unchanged
+		}
+		if err := checkProxmoxToken(m.Name, m.Proxmox.Token); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -503,11 +516,11 @@ func (st *settingsStore) Set(s Settings) (Settings, error) {
 	if err := validateSettings(&s); err != nil {
 		return Settings{}, err
 	}
-	if err := checkEdits(&s); err != nil {
-		return Settings{}, err
-	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if err := checkEdits(&st.s, &s); err != nil {
+		return Settings{}, err
+	}
 	if err := writePrivateJSON(st.path, s); err != nil {
 		return Settings{}, fmt.Errorf("saving settings: %w", err)
 	}

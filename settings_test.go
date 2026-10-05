@@ -178,3 +178,37 @@ func TestBadTokenBlocksSavingButNotStarting(t *testing.T) {
 		t.Fatalf("existing settings with a bad token must still load: %v", err)
 	}
 }
+
+func TestFixingTokensOneAtATime(t *testing.T) {
+	// Two servers saved with secret-only tokens (allowed before the format check existed).
+	appDir = t.TempDir()
+	px := func(name, tok string) Machine {
+		return Machine{Name: name, Type: MachineProxmox, UPS: "ups1", ShutdownAt: 50,
+			Proxmox: &ProxmoxAPI{Host: "https://10.0.0.5:8006", Node: "pve", Token: tok}}
+	}
+	s := newSettings("server")
+	s.Server.Machines = []Machine{px("dell r710", "only-the-secret"), px("proxmox2", "only-the-secret")}
+	if err := writePrivateJSON(settingsPath(), s); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSettingsStore(settingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fixing one must not be blocked by the other's old token.
+	s.Server.Machines[0].Proxmox.Token = "root@pam!ups=1a2b3c4d-1111-2222-3333-444455556666"
+	if _, err := store.Set(s); err != nil {
+		t.Fatalf("fixing dell r710 was blocked: %v", err)
+	}
+	// Editing something else entirely is fine too.
+	s.Server.PollSeconds = 15
+	if _, err := store.Set(s); err != nil {
+		t.Fatalf("an unrelated edit was blocked: %v", err)
+	}
+	// But typing a new bad token is still caught, naming the machine.
+	s.Server.Machines[1].Proxmox.Token = "root@pam!ups"
+	if _, err := store.Set(s); err == nil || !strings.HasPrefix(err.Error(), "proxmox2:") {
+		t.Fatalf("a newly typed bad token should be refused, got %v", err)
+	}
+}
