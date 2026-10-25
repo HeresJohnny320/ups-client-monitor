@@ -27,6 +27,9 @@ import (
 
 const updateRepo = "HeresJohnny320/ups-client-monitor"
 
+// updateTimeout is how long an "update now" request may take, mostly downloading.
+const updateTimeout = 5 * time.Minute
+
 // errUpToDate means there's nothing newer to install.
 var errUpToDate = errors.New("already up to date")
 
@@ -358,32 +361,16 @@ func selfUpdate() (string, error) {
 		}
 	}()
 
-	if outageInProgress() {
-		return "", errors.New("not updating while a UPS is on battery; try again once power is back")
-	}
-	info, rel := checkForUpdate()
-	if rel == nil {
-		if info.Note != "" {
-			return "", errors.New(info.Note)
-		}
-		return "", errUpToDate
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
 	exe, _ = filepath.EvalSymlinks(exe)
-	newPath := newBinaryPath(exe)
-	if err := downloadVerified(rel, ownAssetName(), newPath); err != nil {
-		os.Remove(newPath)
+	tag, newPath, err := prepareUpdate(exe)
+	if err != nil {
 		return "", err
 	}
-	if err := checkNewBinary(newPath, rel.Tag); err != nil {
-		os.Remove(newPath)
-		return "", err
-	}
-
-	log.Printf("[UPDATE] Updating from %s to %s and restarting.", version, rel.Tag)
+	log.Printf("[UPDATE] Updating from %s to %s and restarting.", version, tag)
 	ok = true
 	go func() {
 		time.Sleep(time.Second) // let the reply to whoever asked go out first
@@ -395,7 +382,56 @@ func selfUpdate() (string, error) {
 			updateMu.Unlock()
 		}
 	}()
-	return rel.Tag, nil
+	return tag, nil
+}
+
+// prepareUpdate finds the newest release, downloads it next to exe, checks it against the
+// release's checksums and makes sure it starts. It returns the version and where it is.
+func prepareUpdate(exe string) (tag, newPath string, err error) {
+	if outageInProgress() {
+		return "", "", errors.New("not updating while a UPS is on battery; try again once power is back")
+	}
+	info, rel := checkForUpdate()
+	if rel == nil {
+		if info.Note != "" {
+			return "", "", errors.New(info.Note)
+		}
+		return "", "", errUpToDate
+	}
+	newPath = newBinaryPath(exe)
+	if err := downloadVerified(rel, ownAssetName(), newPath); err != nil {
+		os.Remove(newPath)
+		return "", "", err
+	}
+	if err := checkNewBinary(newPath, rel.Tag); err != nil {
+		os.Remove(newPath)
+		return "", "", err
+	}
+	return rel.Tag, newPath, nil
+}
+
+// updateFileOnly installs the newest release over the program file at exe without
+// restarting anything, for when no monitor is running.
+func updateFileOnly(exe string) (string, error) {
+	tag, newPath, err := prepareUpdate(exe)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "freebsd" && exe == "/"+pfBinPath {
+		if _, err := os.Stat("/" + pfRCPath); err == nil {
+			// On pfSense the installer also refreshes the web page and (re)starts the service.
+			cmd := exec.Command(newPath, "-install-pfsense")
+			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+			err := cmd.Run()
+			os.Remove(newPath)
+			return tag, err
+		}
+	}
+	if err := swapBinary(exe, newPath); err != nil {
+		os.Remove(newPath)
+		return "", err
+	}
+	return tag, nil
 }
 
 // installAndRestart puts the new program in place and restarts into it.
@@ -504,4 +540,67 @@ func updateEverything(s Settings) {
 		updateWait.Unlock()
 	}
 	runSelfUpdate()
+}
+
+// runUpdateCommand is "ups-monitor -update": update the running monitor (or, if none is
+// running, the program file) and report how it went. It returns the exit code.
+func runUpdateCommand() int {
+	fmt.Printf("ups-monitor %s: looking for a newer release...\n", version)
+	_, err := ctlCall(ctlRequest{Cmd: "ping"})
+	switch {
+	case err == nil:
+		return updateRunningMonitor()
+	case errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "permission denied") ||
+		strings.Contains(strings.ToLower(err.Error()), "access is denied"):
+		if runtime.GOOS == "windows" {
+			fmt.Println("The monitor runs under another account. Run this again from an Administrator terminal.")
+		} else {
+			fmt.Println("The monitor runs as another user (probably root). Run this again with sudo.")
+		}
+		return 1
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Println("Couldn't update:", err)
+		return 1
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	tag, err := updateFileOnly(exe)
+	switch {
+	case errors.Is(err, errUpToDate):
+		fmt.Printf("Already up to date (%s).\n", version)
+		return 0
+	case err != nil:
+		fmt.Println("Couldn't update:", err)
+		return 1
+	}
+	fmt.Printf("Updated %s to %s. No monitor was running here; start it again to use the new version.\n", exe, tag)
+	return 0
+}
+
+// updateRunningMonitor asks the running monitor to update and waits for it to come back.
+func updateRunningMonitor() int {
+	resp, err := ctlCall(ctlRequest{Cmd: "update_now"})
+	if err != nil {
+		fmt.Println("Couldn't update:", err)
+		return 1
+	}
+	fmt.Println(resp.Info)
+	if resp.Update == nil || !resp.Update.Available {
+		return 0
+	}
+	want := resp.Update.Latest
+	fmt.Print("Waiting for the monitor to restart")
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		fmt.Print(".")
+		if r, err := ctlCall(ctlRequest{Cmd: "status"}); err == nil && r.Status != nil && r.Status.Version == want {
+			fmt.Printf("\nDone: the monitor is now running %s.\n", want)
+			return 0
+		}
+	}
+	fmt.Printf("\nThe monitor hasn't come back on %s yet. Check its log: %s\n", want, filepath.Join(appDir, "activity.log"))
+	return 1
 }

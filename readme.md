@@ -28,17 +28,29 @@ Anything else that should shut itself down cleanly runs it in **client** mode. A
 
 ## Getting started
 
-Grab a build for your platform from the [Releases](../../releases) page, or build it yourself (see the end of this page).
+### Installing
+
+Run one command on each computer. It downloads the newest release for that computer, checks it against the release's checksums, installs it, and sets it up to start at boot:
+
+**Linux, macOS and the BSDs**
+```sh
+curl -fsSL https://raw.githubusercontent.com/HeresJohnny320/ups-client-monitor/main/install.sh | sudo sh
+```
+
+**Windows** (in an Administrator PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/HeresJohnny320/ups-client-monitor/main/install.ps1 | iex
+```
+
+**pfSense**: see [Running the server on pfSense](#running-the-server-on-pfsense).
+
+**Run the same command again to update.** It replaces the old copy, keeps your settings and pairing, and restarts the monitor. If you set it up by hand before, your settings are copied over the first time.
+
+It's installed as a service that runs as root (SYSTEM on Windows), with its settings in `/usr/local/etc/ups-monitor` (`C:\ProgramData\ups-monitor` on Windows). To open the settings, run `sudo ups-monitor`, or `ups-monitor` from an Administrator terminal on Windows. You can also download a build from the [Releases](../../releases) page and run it yourself, or build it from source (see the end of this page).
 
 ### Setting up the server
 
-Run it in a terminal:
-
-```bash
-./ups-monitor
-```
-
-It'll offer to start the monitor in the background. Say yes, pick **Server**, then:
+Install it as above, then open the settings with `sudo ups-monitor` (or just run a downloaded copy with `./ups-monitor`, which offers to start the monitor in the background). Pick **Server**, then:
 
 1. Under **General**, point it at your NUT server. The NUT username and password are optional; you only need them for battery self-tests.
 2. Under **Machines**, add each thing it should look after. For each one, pick which UPS powers it, the battery % to shut it down at, and (optionally) its MAC address and the battery % to wake it back up at.
@@ -50,7 +62,7 @@ Every save takes effect straight away. When you quit with `q`, the monitor keeps
 
 On the server, add the PC under **Machines** with the type set to *Client (this app)*. When you save, it shows a pairing code that looks like `upsmon://192.168.1.5:3494?...`.
 
-On the PC, run `./ups-monitor`, pick **Client**, go to **Server Connection** and paste the code. That's it. The client's Status screen should show it's connected, plus the battery level the server will shut it down at.
+On the PC, install it as above, open the settings (`sudo ups-monitor`, or `ups-monitor` in an Administrator terminal on Windows), pick **Client**, go to **Server Connection** and paste the code. That's it. The client's Status screen should show it's connected, plus the battery level the server will shut it down at.
 
 The code includes the client's secret key, so treat it like a password. To copy it out of the terminal, hold Shift while you select it with the mouse.
 
@@ -243,6 +255,7 @@ The program can update itself from this project's releases on GitHub:
 - **pfSense:** **Status → Updates** has **Check for updates**, **Update this server** and **Update everything**, which updates every connected client and then the server. Each client on the **Machines** tab also has its own **Update** button, and the **Version** column shows what each one runs.
 - **Terminal UI:** the same buttons are under **Run Actions**, and each client's edit screen has an **Update** button.
 - **Notifications:** the monitor checks for a new release every few hours and posts it to Discord once.
+- **On any one computer:** run `sudo ups-monitor -update` (on Windows, `ups-monitor -update` in an Administrator terminal). It updates the running monitor and waits until it's back on the new version. Re-running the install command does the same.
 
 What happens when you update:
 
@@ -323,80 +336,19 @@ A machine's `type` is `proxmox`, `truenas`, `client` or `wake_only` (woken after
 
 ## Running it at boot
 
-The monitor notices when it's started without a terminal (by systemd, Task Scheduler and so on) and runs without the UI. You can also force that with `-daemon`.
+The install command sets this up for you:
 
-### Linux (systemd)
+| System | How it starts at boot |
+|---|---|
+| Linux with systemd | the `ups-monitor` systemd service (`systemctl status ups-monitor`) |
+| macOS | the `com.upsmonitor` launchd service |
+| Windows | the "UPS Monitor" task, running as SYSTEM |
+| pfSense | its own service, on **Status → Services** |
+| Others (Alpine, the BSDs, illumos) | it's started right away, and the installer prints the line to add to `/etc/rc.local` or your init system |
 
-Save this as `/etc/systemd/system/ups-monitor.service`, with `/path/to/` changed to wherever you put the binary:
+The monitor notices when it's started without a terminal and runs without the UI; `-daemon` forces that. If it runs as a service, stop it with the service manager (for example `systemctl stop ups-monitor`), because "Stop Background Monitor" in the UI won't stick: the service manager just starts it again.
 
-```ini
-[Unit]
-Description=UPS Monitor
-After=network.target
-
-[Service]
-ExecStart=/path/to/ups-monitor -daemon
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now ups-monitor
-```
-
-Because the service runs as root, open the UI with `sudo /path/to/ups-monitor` so it finds the right settings. To stop the monitor, use `systemctl stop ups-monitor`; the "Stop Background Monitor" menu item won't stick, because systemd just starts it again.
-
-### Windows
-
-In an admin PowerShell:
-
-```powershell
-$action = New-ScheduledTaskAction -Execute "C:\path\to\ups-monitor.exe" -Argument "-daemon -config-dir C:\ProgramData\ups-monitor"
-$trigger = New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "UPSMonitor" -User "SYSTEM" -RunLevel Highest
-```
-
-The task runs as SYSTEM, so both it and you need to use the same settings folder. To open the UI, run `C:\path\to\ups-monitor.exe -config-dir C:\ProgramData\ups-monitor` from an admin terminal.
-
-### macOS (launchd)
-
-Save this as `~/Library/LaunchAgents/com.upsmonitor.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.upsmonitor</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/ups-monitor</string>
-        <string>-daemon</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-```
-
-Then load it with `launchctl load ~/Library/LaunchAgents/com.upsmonitor.plist`.
-
-### Other systems
-
-On the BSDs, illumos and Solaris, start it at boot the same way you'd start any other background program, and include the `-daemon` option. For example, on OpenBSD or NetBSD you'd add this line to `/etc/rc.local`:
-
-```sh
-/usr/local/bin/ups-monitor -daemon &
-```
+To remove it, run `sudo ups-monitor -uninstall` (or `ups-monitor -uninstall` in an Administrator terminal on Windows). Your settings folder is kept.
 
 ## Command-line options
 
@@ -405,6 +357,9 @@ On the BSDs, illumos and Solaris, start it at boot the same way you'd start any 
 | `-daemon` | Run the monitor without the UI. |
 | `-config-dir <path>` | Use a different settings folder. |
 | `-version` | Print the version and exit. |
+| `-install` | Install or update it as a service that starts at boot, then start it. |
+| `-uninstall` | Remove the service and the installed program. Settings are kept. |
+| `-update` | Update to the newest release: the running monitor, or this program file if none is running. |
 | `-install-pfsense` | Install or update the pfSense page, widget and service (run as root on pfSense). |
 | `-uninstall-pfsense` | Remove them again. Settings are kept. |
 

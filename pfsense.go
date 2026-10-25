@@ -187,10 +187,10 @@ func installPfSense() error {
 	}
 	step("program:       /" + pfBinPath)
 
-	if err := os.MkdirAll(pfPath(pfsenseSettingsDir), 0700); err != nil {
+	if err := os.MkdirAll(pfPath(serviceSettingsDir), 0700); err != nil {
 		return err
 	}
-	step("settings:      " + pfsenseSettingsDir)
+	step("settings:      " + serviceSettingsDir)
 
 	for src, dst := range pfWebFiles {
 		data, err := pfsenseFiles.ReadFile(src)
@@ -219,7 +219,7 @@ func installPfSense() error {
 
 	fmt.Println()
 	fmt.Println("Done. In the pfSense web UI, open Services > UPS Monitor to set it up.")
-	fmt.Println("Settings live in " + pfsenseSettingsDir + ", which pfSense's config backups don't include.")
+	fmt.Println("Settings live in " + serviceSettingsDir + ", which pfSense's config backups don't include.")
 	return nil
 }
 
@@ -239,6 +239,6 @@ func uninstallPfSense() error {
 	}
 	os.Remove(pfPath(pfRCPath))
 	os.Remove(pfPath(pfBinPath))
-	fmt.Println("Done. Your settings were kept in " + pfsenseSettingsDir + "; delete that folder to remove them too.")
+	fmt.Println("Done. Your settings were kept in " + serviceSettingsDir + "; delete that folder to remove them too.")
 	return nil
 }

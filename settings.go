@@ -151,15 +151,31 @@ func (m Machine) apiTarget() ShutdownTarget {
 // It defaults to the user config dir and can be overridden with -config-dir.
 var appDir string
 
-// pfsenseSettingsDir is where the pfSense install keeps its settings.
-const pfsenseSettingsDir = "/usr/local/etc/ups-monitor"
+// serviceSettingsDir is where an installed service keeps its settings on Linux, macOS and
+// the BSDs (including pfSense). Windows uses windowsSettingsDir() instead.
+const serviceSettingsDir = "/usr/local/etc/ups-monitor"
+
+func windowsSettingsDir() string {
+	pd := os.Getenv("ProgramData")
+	if pd == "" {
+		pd = `C:\ProgramData`
+	}
+	return filepath.Join(pd, "ups-monitor")
+}
+
+// installedSettingsDir is the service's settings folder on this system.
+func installedSettingsDir() string {
+	if runtime.GOOS == "windows" {
+		return windowsSettingsDir()
+	}
+	return serviceSettingsDir
+}
 
 func defaultAppDir() string {
-	// On pfSense the service uses a fixed folder, so a plain "ups-monitor" over SSH finds it.
-	if runtime.GOOS == "freebsd" {
-		if fi, err := os.Stat(pfsenseSettingsDir); err == nil && fi.IsDir() {
-			return pfsenseSettingsDir
-		}
+	// Once it's installed as a service, everyone uses the service's settings, so a plain
+	// "ups-monitor" (with sudo or an admin prompt) finds the running monitor.
+	if fi, err := os.Stat(installedSettingsDir()); err == nil && fi.IsDir() {
+		return installedSettingsDir()
 	}
 	baseDir, _ := os.UserConfigDir()
 	return filepath.Join(baseDir, "ups-monitor")

@@ -41,7 +41,7 @@ func TestPfSenseInstallAndUninstall(t *testing.T) {
 	}
 	checkInstalled(t, filepath.Join(root, pfRCPath), 0755)
 	checkInstalled(t, filepath.Join(root, pfBinPath), 0755)
-	checkInstalled(t, filepath.Join(root, pfsenseSettingsDir), 0700)
+	checkInstalled(t, filepath.Join(root, serviceSettingsDir), 0700)
 	want := []string{
 		"usr/local/bin/php -f register.php install",
 		"usr/local/etc/rc.d/ups_monitor.sh restart",
@@ -72,7 +72,7 @@ func TestPfSenseInstallAndUninstall(t *testing.T) {
 			t.Errorf("/%s was not removed", p)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, pfsenseSettingsDir)); err != nil {
+	if _, err := os.Stat(filepath.Join(root, serviceSettingsDir)); err != nil {
 		t.Error("uninstall removed the settings folder; it should keep it")
 	}
 }

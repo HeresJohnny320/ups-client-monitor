@@ -160,6 +160,9 @@ func serveControl(ln net.Listener, store *settingsStore, stop chan struct{}) {
 			if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&req); err != nil {
 				return
 			}
+			if req.Cmd == "update_now" {
+				conn.SetDeadline(time.Now().Add(updateTimeout)) // downloading can take a while
+			}
 			resp := handleControl(req, store)
 			json.NewEncoder(conn).Encode(resp)
 			if req.Cmd == "stop" {
@@ -236,6 +239,17 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			return ctlResponse{Error: err.Error()}
 		}
 		return ctlResponse{OK: true, Info: "Magic packet sent to " + w.MAC + " via " + strings.Join(via, ", ")}
+	case "update_now":
+		// Like the Update button, but answers with the outcome (the restart follows).
+		tag, err := selfUpdate()
+		switch {
+		case errors.Is(err, errUpToDate):
+			return ctlResponse{OK: true, Info: "Already up to date (" + version + ")."}
+		case err != nil:
+			return ctlResponse{Error: err.Error()}
+		}
+		return ctlResponse{OK: true, Info: "Updating from " + version + " to " + tag + ".",
+			Update: &UpdateInfo{Current: version, Latest: tag, Available: true}}
 	case "update_check":
 		info, _ := checkForUpdate()
 		return ctlResponse{OK: true, Update: &info}
@@ -388,13 +402,17 @@ func pairingCodes(store *settingsStore, name string) ([]Pairing, error) {
 
 // ctlCall sends one request to the running monitor.
 func ctlCall(req ctlRequest) (ctlResponse, error) {
+	timeout := 30 * time.Second
+	if req.Cmd == "update_now" {
+		timeout = updateTimeout
+	}
 	var resp ctlResponse
 	conn, err := net.DialTimeout("unix", socketPath(), 2*time.Second)
 	if err != nil {
 		return resp, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	conn.SetDeadline(time.Now().Add(timeout))
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return resp, err
 	}

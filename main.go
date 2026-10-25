@@ -66,11 +66,25 @@ func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	pfInstall := flag.Bool("install-pfsense", false, "install (or update) the pfSense web page, widget and service, then start it")
 	pfUninstall := flag.Bool("uninstall-pfsense", false, "remove the pfSense web page, widget and service (settings are kept)")
+	update := flag.Bool("update", false, "update to the newest release (the running monitor, or this program file if none is running)")
+	install := flag.Bool("install", false, "install (or update) as a background service that starts at boot, then start it")
+	uninstall := flag.Bool("uninstall", false, "remove the background service and the installed program (settings are kept)")
 	daemon := flag.Bool("daemon", false, "run the monitor in the foreground with no UI (for systemd, launchd, Task Scheduler)")
 	dir := flag.String("config-dir", defaultAppDir(), "settings folder holding settings.json, state.json, activity.log and the control socket")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ups-monitor", version)
+		return
+	}
+	if *install || *uninstall {
+		run := installService
+		if *uninstall {
+			run = uninstallService
+		}
+		if err := run(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *pfInstall || *pfUninstall {
@@ -86,6 +100,10 @@ func main() {
 	}
 	appDir = *dir
 	os.MkdirAll(appDir, 0755)
+
+	if *update {
+		os.Exit(runUpdateCommand())
+	}
 
 	// Services have no terminal, so they run the monitor directly like before.
 	if *daemon || !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
