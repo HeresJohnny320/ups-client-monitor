@@ -1,7 +1,9 @@
 name: Test & Build
 
-# Every push to main publishes an alpha prerelease (alpha-<run number>).
-# Pushing a tag like v1.0.0 publishes a normal release instead.
+# Every push to main that changes the program is released automatically as the next
+# version (v3.7 -> v3.8) and marked Latest. Pushes that only touch docs or this workflow
+# are tested and built but not released. Pushing a tag like v4.0 releases that version,
+# and automatic numbering carries on from it.
 
 on:
   push:
@@ -12,6 +14,12 @@ on:
 
 permissions:
   contents: read
+
+# Runs on main wait for each other, so two quick pushes can't claim the same version.
+# Pull request runs replace older runs for the same pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -51,17 +59,38 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
-      prerelease: ${{ steps.v.outputs.prerelease }}
+      release: ${{ steps.v.outputs.release }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags and history, to find the last version and what changed
       - id: v
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # A tag pushed by hand: release exactly that version.
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=alpha-$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # The newest version tag, sorted as versions (v3.10 comes after v3.9).
+          last=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            next=v1.0
+            changed=true
+          else
+            # Bump the last number: v3.7 -> v3.8, v3.6.1 -> v3.6.2.
+            next=$(echo "$last" | awk -F. -v OFS=. '{ $NF = $NF + 1; print }')
+            # Only release when something that goes into the program changed since $last.
+            if git diff --quiet "$last" HEAD -- . ':(exclude)*.md' ':(exclude).github' ':(exclude)LICENSE' ':(exclude).gitignore'; then
+              changed=false
+            else
+              changed=true
+            fi
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "release=$changed" >> "$GITHUB_OUTPUT"
+          echo "Last version: ${last:-none}. Next: $next. Program changed: $changed."
 
   build:
     name: Build ${{ matrix.name }}
@@ -124,8 +153,12 @@ jobs:
 
   release:
     name: Publish ${{ needs.version.outputs.version }}
-    # Only for pushes to main or version tags, never for pull requests.
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Pushes to main (and manual runs on main) and version tags; never pull requests,
+    # and never when only docs or this workflow changed.
+    if: >-
+      needs.version.outputs.release == 'true' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')))
     needs: [build, version]
     runs-on: ubuntu-latest
     permissions:
@@ -139,24 +172,12 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
 
-      - name: Release notes
-        run: |
-          if [ "${{ needs.version.outputs.prerelease }}" = "true" ]; then
-            {
-              echo "⚠️ **Alpha build** from \`${GITHUB_SHA::7}\`, published automatically from \`main\`."
-              echo "Test it with \`UPS_MONITOR_DRY_RUN=1\` before relying on it for real shutdowns."
-            } > notes.md
-          else
-            : > notes.md
-          fi
-
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.version }}
-          name: ${{ needs.version.outputs.prerelease == 'true' && format('Alpha {0}', github.run_number) || needs.version.outputs.version }}
+          name: ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
-          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
-          body_path: notes.md
+          prerelease: false
+          make_latest: "true"
           generate_release_notes: true
           files: dist/*

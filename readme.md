@@ -410,7 +410,7 @@ On the BSDs, illumos and Solaris, start it at boot the same way you'd start any 
 
 ## Builds and releases
 
-Every push to `main` gets tested on Linux, Windows and macOS and published as an alpha pre-release (`alpha-1`, `alpha-2`, …). Those haven't been tested on real hardware, so give them a dry run first. Tagged versions like `v1.0.0` are published as normal releases. `ups-monitor -version` tells you which one you're running.
+Every push to `main` is tested on Linux, Windows and macOS. If it changes the program, it's then released automatically as the next version (v3.7, then v3.8, then v3.9…) and marked **Latest**, with release notes listing the changes. Pushes that only change the docs are tested but not released. To jump to a new major version, push the tag yourself (`git tag v4.0 && git push origin v4.0`); numbering then carries on from there. `ups-monitor -version` tells you which version you're running.
 
 There are builds for:
 

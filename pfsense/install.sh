@@ -4,10 +4,8 @@
 #
 #   fetch -o - https://raw.githubusercontent.com/HeresJohnny320/ups-client-monitor/main/pfsense/install.sh | sh
 #
-# That picks the newest release, or the newest alpha if there's no release with a pfSense
-# build yet. To always take the newest alpha:
-#
-#   fetch -o - https://raw.githubusercontent.com/HeresJohnny320/ups-client-monitor/main/pfsense/install.sh | sh -s alpha
+# That picks the newest release. Older instructions add "-s alpha"; that still works and
+# picks the newest build of any kind, including old pre-releases.
 #
 # Running it again updates to the newest version and keeps your settings.
 
@@ -45,14 +43,16 @@ FOUND=$(fetch -q -o - "https://api.github.com/repos/$REPO/releases?per_page=50" 
 	if (!is_array($releases)) {
 		exit(1);
 	}
-	// "release" prefers real releases and falls back to alphas; "alpha" takes the newest alpha.
+	// Newest first. GitHub's own order isn't strictly by date, so sort it here.
+	usort($releases, function ($a, $b) {
+		return strcmp((string)$b["published_at"], (string)$a["published_at"]);
+	});
+	// "release" prefers real releases and falls back to pre-releases; "alpha" takes the
+	// newest build of any kind.
 	$passes = $channel === "alpha" ? array(true) : array(false, true);
 	foreach ($passes as $allow_pre) {
 		foreach ($releases as $r) {
 			if (!empty($r["prerelease"]) && !$allow_pre) {
-				continue;
-			}
-			if ($channel === "alpha" && empty($r["prerelease"])) {
 				continue;
 			}
 			$bin = $sums = "";
