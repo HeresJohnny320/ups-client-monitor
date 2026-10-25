@@ -90,7 +90,7 @@ func TestLinkShutdownOrder(t *testing.T) {
 		if onBattery {
 			status = "OB"
 		}
-		return upsEvent{ups: ups, status: status, charge: charge, chargeKnown: true, onBattery: onBattery}
+		return upsEvent{ups: ups, status: status, charge: charge, chargeKnown: true, onBattery: onBattery, confirmed: onBattery}
 	}
 	conf := srv.Get().Server
 	// On battery but above the 30% limit: no order.

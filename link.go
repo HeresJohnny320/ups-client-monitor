@@ -474,6 +474,7 @@ func handleClientShutdowns(srv *ServerSettings, e upsEvent) {
 		cc := hub.get(c.Name)
 		if !s.announced {
 			s.announced = true
+			armWake(c) // it's being shut down, so wake it once power is back
 			msg := fmt.Sprintf("⚠️ **UPS Shutdown**: Battery at %d%%. Telling client `%s` to shut down.", e.charge, c.Name)
 			log.Println(msg)
 			sendDiscordWebhookAsync(srv.webhookFor(c), msg)

@@ -29,50 +29,59 @@ func wakeMachine(name, mac, ups string, at int) Machine {
 	return Machine{Name: name, Type: MachineWakeOnly, UPS: ups, Wake: &WakeSettings{MAC: mac, AtPercent: at, Broadcast: "127.0.0.1"}}
 }
 
+// ev is a confirmed reading: on battery long enough to count as a real outage.
 func ev(ups string, charge int, onBattery bool) upsEvent {
-	return upsEvent{ups: ups, charge: charge, chargeKnown: true, onBattery: onBattery}
+	return upsEvent{ups: ups, charge: charge, chargeKnown: true, onBattery: onBattery, confirmed: onBattery}
 }
 
-func TestWakeOnlyAfterOutage(t *testing.T) {
+func clientMachine(name, ups string, shutdownAt, wakeAt int) Machine {
+	return Machine{Name: name, Type: MachineClient, UPS: ups, ShutdownAt: shutdownAt, ClientKey: "0123456789abcdef",
+		Wake: &WakeSettings{MAC: "aa:bb:cc:dd:ee:0" + name[:1], AtPercent: wakeAt, Broadcast: "127.0.0.1"}}
+}
+
+// outage runs one reading through the shutdown and wake handlers, like a monitor poll.
+func outage(srv *ServerSettings, e upsEvent) {
+	handleClientShutdowns(srv, e)
+	handleWakes(srv, e)
+}
+
+func TestWakeOnlyWhatWasShutDown(t *testing.T) {
 	resetWakeState()
+	stateMu.Lock()
+	clientStates = make(map[string]*clientState)
+	stateMu.Unlock()
 	srv := &ServerSettings{Machines: []Machine{
-		wakeMachine("nas", "aa:bb:cc:dd:ee:01", "ups2", 40),
-		wakeMachine("pve", "aa:bb:cc:dd:ee:02", "ups2", 80),
-		wakeMachine("desk", "aa:bb:cc:dd:ee:03", "ups1", 50),
-		{Name: "no-wake", Type: MachineClient, UPS: "ups2", ShutdownAt: 30, ClientKey: "0123456789abcdef"},
+		clientMachine("nas", "ups2", 70, 40),
+		clientMachine("pve", "ups2", 50, 80),
+		wakeMachine("printer", "aa:bb:cc:dd:ee:09", "ups2", 20),
+		clientMachine("desk", "ups1", 90, 50),
 	}}
 
-	// On mains with no outage: nothing is woken (a machine turned off on purpose stays off).
-	handleWakes(srv, ev("ups2", 100, false))
+	// A blip: on battery at 98%, nothing reaches its shutdown %, power comes back.
+	// Nothing was shut down, so nothing is woken (this used to wake everything).
+	outage(srv, ev("ups2", 98, true))
+	outage(srv, ev("ups2", 98, false))
 	stateMu.Lock()
 	woken := len(lastWakeAttempt)
 	stateMu.Unlock()
 	if woken != 0 {
-		t.Fatal("woke a machine without an outage")
+		t.Fatal("a blip that shut nothing down woke machines")
 	}
 
-	// ups2 goes on battery, then power returns at 30%.
-	handleWakes(srv, ev("ups2", 60, true))
-	handleWakes(srv, ev("ups2", 30, false))
-	if wakesSent("nas") != 0 || wakesSent("pve") != 0 {
+	// A real outage on ups2 down to 60%: only the NAS (70%) is shut down and armed.
+	outage(srv, ev("ups2", 60, true))
+	outage(srv, ev("ups2", 30, false)) // power back, below the NAS's 40% wake level
+	if wakesSent("nas") != 0 {
 		t.Fatal("woke before reaching the wake %")
 	}
-
-	// 50%: the NAS (40%) wakes, Proxmox (80%) keeps waiting, ups1's desk is untouched.
-	handleWakes(srv, ev("ups2", 50, false))
-	if wakesSent("nas") != 1 || wakesSent("pve") != 0 {
-		t.Fatalf("at 50%%: nas=%d pve=%d", wakesSent("nas"), wakesSent("pve"))
-	}
-	stateMu.Lock()
-	_, deskPending := wakePending["desk"]
-	_, noWakePending := wakePending["no-wake"]
-	stateMu.Unlock()
-	if deskPending || noWakePending {
-		t.Fatal("armed a machine on another UPS or without Wake-on-LAN")
+	outage(srv, ev("ups2", 50, false))
+	if wakesSent("nas") != 1 || wakesSent("pve") != 0 || wakesSent("printer") != 0 || wakesSent("desk") != 0 {
+		t.Fatalf("after the outage: nas=%d pve=%d printer=%d desk=%d (only the NAS was shut down)",
+			wakesSent("nas"), wakesSent("pve"), wakesSent("printer"), wakesSent("desk"))
 	}
 
 	// Retries wait for the interval, then stop after wakeAttempts packets.
-	handleWakes(srv, ev("ups2", 55, false))
+	outage(srv, ev("ups2", 55, false))
 	if wakesSent("nas") != 1 {
 		t.Fatal("re-sent before the retry interval")
 	}
@@ -80,22 +89,20 @@ func TestWakeOnlyAfterOutage(t *testing.T) {
 		stateMu.Lock()
 		lastWakeAttempt["nas"] = time.Now().Add(-wakeRetryInterval - time.Second)
 		stateMu.Unlock()
-		handleWakes(srv, ev("ups2", 90, false))
+		outage(srv, ev("ups2", 90, false))
 	}
 	if wakesSent("nas") != wakeAttempts {
 		t.Fatalf("nas got %d packets, want %d", wakesSent("nas"), wakeAttempts)
 	}
-	if wakesSent("pve") != 1 {
-		t.Fatalf("pve should wake at 90%%, got %d packets", wakesSent("pve"))
-	}
 
-	// The next outage re-arms everything on that UPS.
-	handleWakes(srv, ev("ups2", 95, true))
-	stateMu.Lock()
-	rearmed := wakePending["nas"] == wakeAttempts
-	stateMu.Unlock()
-	if !rearmed {
-		t.Fatal("a new outage did not re-arm the wake")
+	// The UPS running out (low battery): everything on it may lose power, so all of it is
+	// woken afterwards, including machines it doesn't shut down.
+	resetWakeState()
+	outage(srv, upsEvent{ups: "ups2", status: "OB LB", charge: 8, chargeKnown: true, onBattery: true, lowBattery: true, confirmed: true})
+	outage(srv, ev("ups2", 100, false))
+	if wakesSent("nas") != 1 || wakesSent("pve") != 1 || wakesSent("printer") != 1 || wakesSent("desk") != 0 {
+		t.Fatalf("after low battery: nas=%d pve=%d printer=%d desk=%d (desk is on another UPS)",
+			wakesSent("nas"), wakesSent("pve"), wakesSent("printer"), wakesSent("desk"))
 	}
 }
 

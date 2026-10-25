@@ -9,8 +9,9 @@ import (
 // Wake-on-LAN recovery.
 //
 // Machines are only woken after a power event, never on a timer, so a machine you
-// turn off on purpose stays off. A power event is the UPS going on battery, or the
-// server itself starting (it may have lost power too; see no_wake_on_start).
+// turn off on purpose stays off. A machine is woken if this server shut it down, if its
+// UPS reported low battery (it may have lost power), or after the server itself starts
+// (it may have lost power too; see wake_after_restart). A short blip wakes nothing.
 // Once the UPS is back on mains and recharged to the target's %, a few packets are
 // sent a few minutes apart, in case the first arrives while the machine is still
 // shutting down.
@@ -42,6 +43,13 @@ func armWakesOnStart(s Settings) {
 	}
 }
 
+// armWake queues a wake for a machine once its UPS is back on mains. Caller holds stateMu.
+func armWake(m Machine) {
+	if m.Wake != nil {
+		wakePending[m.Name] = wakeAttempts
+	}
+}
+
 func handleWakes(srv *ServerSettings, e upsEvent) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
@@ -52,8 +60,14 @@ func handleWakes(srv *ServerSettings, e upsEvent) {
 			continue
 		}
 		if e.onBattery {
-			wakePending[m.Name] = wakeAttempts
-			delete(lastWakeAttempt, m.Name)
+			// Machines are armed when they're shut down (see armWake). If the UPS is about to
+			// run out, everything on it may lose power, so arm the rest too.
+			if e.confirmed && e.lowBattery && !e.testing && (!e.chargeKnown || e.charge < fullCharge) {
+				armWake(m)
+			}
+			if wakePending[m.Name] > 0 {
+				delete(lastWakeAttempt, m.Name) // wake promptly once power is back
+			}
 			continue
 		}
 		left := wakePending[m.Name]
@@ -62,9 +76,9 @@ func handleWakes(srv *ServerSettings, e upsEvent) {
 		}
 		attempt := wakeAttempts - left + 1
 		if attempt == 1 {
-			msg := fmt.Sprintf("✅ **Power Restored**: Waking node `%s` (%s). Battery at %d%%.", m.Name, w.MAC, e.charge)
-			log.Println(msg)
-			sendDiscordWebhookAsync(srv.webhookFor(m), msg)
+			// The MAC address stays out of Discord; the local log keeps it for troubleshooting.
+			log.Printf("✅ **Power Restored**: Waking node `%s` (%s). Battery at %d%%.", m.Name, w.MAC, e.charge)
+			sendDiscordWebhookAsync(srv.webhookFor(m), fmt.Sprintf("✅ **Power Restored**: Waking node `%s`. Battery at %d%%.", m.Name, e.charge))
 		} else {
 			log.Printf("[WOL] Re-sending wake packet to %s (%d/%d).", m.Name, attempt, wakeAttempts)
 		}

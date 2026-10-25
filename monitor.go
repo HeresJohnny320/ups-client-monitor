@@ -17,13 +17,77 @@ type upsEvent struct {
 	status      string
 	charge      int
 	chargeKnown bool
-	onBattery   bool
-	lowBattery  bool // NUT's LB flag: critical, shut down now, even if charge is unreadable
+	onBattery   bool // OB (or FSD): running on battery right now
+	lowBattery  bool // LB (or FSD): the UPS says shut down now, even if charge is unreadable
+	confirmed   bool // on battery in enough readings in a row to be a real outage, not a blip
+	testing     bool // a battery self-test is running, which can put the UPS on battery on purpose
 }
+
+const (
+	// fullCharge: at or above this charge nothing is shut down. A UPS that is this full and
+	// reports trouble is having a blip, running a self-test, or reporting nonsense.
+	fullCharge = 99
+	// confirmReadings: how many readings in a row must say "on battery" before acting.
+	confirmReadings = 2
+	// settleReadings: after NUT (re)connects, how many good readings in a row before acting.
+	settleReadings = 2
+)
 
 // reachedShutdown reports whether a machine with this shutdown % should go down now.
 func (e upsEvent) reachedShutdown(limit int) bool {
-	return e.onBattery && (e.lowBattery || (e.chargeKnown && e.charge <= limit))
+	if !e.onBattery || !e.confirmed {
+		return false
+	}
+	if e.chargeKnown && e.charge >= fullCharge {
+		return false
+	}
+	// During a self-test some UPSes raise LB on purpose; only the real charge counts then.
+	return (e.lowBattery && !e.testing) || (e.chargeKnown && e.charge <= limit)
+}
+
+// statusFlags splits NUT's ups.status ("OB DISCHRG LB") into its flags.
+func statusFlags(status string) map[string]bool {
+	flags := map[string]bool{}
+	for _, f := range strings.Fields(status) {
+		flags[f] = true
+	}
+	return flags
+}
+
+var (
+	obStreak  = map[string]int{}       // readings in a row on battery, per UPS (monitor goroutine only)
+	goodPolls int                      // good NUT readings in a row since it last failed (monitor goroutine only)
+	testUntil = map[string]time.Time{} // per UPS: a self-test we started counts as running until then (stateMu)
+)
+
+// readingEvent turns one UPS reading into an event, counting how many readings in a row
+// have been on battery and whether a self-test is running, and records it for the UI.
+func readingEvent(name, status string, charge int, chargeKnown bool) upsEvent {
+	flags := statusFlags(status)
+	e := upsEvent{
+		ups: name, status: status, charge: charge, chargeKnown: chargeKnown,
+		onBattery:  flags["OB"] || flags["FSD"],
+		lowBattery: flags["LB"] || flags["FSD"],
+	}
+	if e.onBattery {
+		obStreak[name]++
+	} else {
+		obStreak[name] = 0
+	}
+	e.confirmed = e.onBattery && obStreak[name] >= confirmReadings
+
+	stateMu.Lock()
+	upsReadings[name] = upsReading{Status: status, Charge: charge, ChargeKnown: chargeKnown, Seen: time.Now()}
+	e.testing = flags["TEST"] || flags["CAL"] || time.Now().Before(testUntil[name])
+	stateMu.Unlock()
+	return e
+}
+
+// nutFailed forgets everything learned from NUT, so nothing acts until it is steady again.
+func nutFailed(err error) {
+	setNutState(false, err)
+	goodPolls = 0
+	obStreak = map[string]int{}
 }
 
 var lastTestAttempt = make(map[string]time.Time) // only used by the monitor goroutine
@@ -80,19 +144,19 @@ func pollNUT(store *settingsStore, srv *ServerSettings) {
 
 	client, err := nutConnect(srv.NUT)
 	if err != nil {
-		setNutState(false, err)
+		nutFailed(err)
 		return
 	}
 	defer client.Disconnect()
 
-	runScheduledTests(store, srv)
-
 	upsList, err := client.GetUPSList()
 	if err != nil {
-		setNutState(false, fmt.Errorf("reading UPS list: %w", err))
+		nutFailed(fmt.Errorf("reading UPS list: %w", err))
 		return
 	}
 	setNutState(true, nil)
+	goodPolls++
+	settled := goodPolls >= settleReadings
 	for _, ups := range upsList {
 		var chargeStr, status string
 		for _, v := range ups.Variables {
@@ -104,19 +168,20 @@ func pollNUT(store *settingsStore, srv *ServerSettings) {
 			}
 		}
 		charge, chargeKnown := parseCharge(chargeStr)
-		e := upsEvent{
-			ups: ups.Name, status: status, charge: charge, chargeKnown: chargeKnown,
-			onBattery: isOnBatteryStatus(status), lowBattery: strings.Contains(status, "LB"),
+		e := readingEvent(ups.Name, status, charge, chargeKnown)
+
+		// Right after NUT (re)connects, readings are only recorded, never acted on.
+		if !settled {
+			continue
 		}
-
-		stateMu.Lock()
-		upsReadings[ups.Name] = upsReading{Status: status, Charge: charge, ChargeKnown: chargeKnown, Seen: time.Now()}
-		stateMu.Unlock()
-
 		handleAPIShutdowns(srv, e)
 		handleClientShutdowns(srv, e)
 		handleWakes(srv, e)
 	}
+
+	// Self-tests start after the readings, so a test's own "on battery" is never mistaken
+	// for an outage in the same check.
+	runScheduledTests(store, srv)
 }
 
 // handleAPIShutdowns sends one Proxmox/TrueNAS API shutdown per machine per outage,
@@ -144,6 +209,7 @@ func handleAPIShutdowns(srv *ServerSettings, e upsEvent) {
 		if s == nil {
 			s = &remoteState{}
 			remoteStates[m.Name] = s
+			armWake(m) // it's being shut down, so wake it once power is back
 		}
 		if s.done || s.inFlight || time.Since(s.lastAttempt) < remoteRetryInterval {
 			continue
@@ -230,6 +296,9 @@ func runSingleUpsTest(store *settingsStore, srv *ServerSettings, upsName string,
 		sendDiscordWebhook(webhook, "❌ Failed to start test on "+upsName)
 		return
 	}
+	stateMu.Lock()
+	testUntil[upsName] = time.Now().Add(10 * time.Minute) // cleared early when the result comes in
+	stateMu.Unlock()
 	log.Printf("[TEST] Started %s on %s", cmdName, upsName)
 	sendDiscordWebhook(webhook, "🔍 Started test on "+upsName)
 	go monitorTestResult(*srv, upsName)
@@ -310,6 +379,12 @@ func upsCommands(client nutCommander, upsName string) (map[string]bool, error) {
 
 func monitorTestResult(srv ServerSettings, upsName string) {
 	webhook := srv.testWebhook()
+	// Give the UPS a minute to settle back after the test before readings count again.
+	defer func() {
+		stateMu.Lock()
+		testUntil[upsName] = time.Now().Add(time.Minute)
+		stateMu.Unlock()
+	}()
 	time.Sleep(15 * time.Second)
 
 	for i := 0; i < 30; i++ {

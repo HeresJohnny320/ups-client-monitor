@@ -50,7 +50,7 @@ func TestShutdownSwitchOff(t *testing.T) {
 			Wake:    &WakeSettings{MAC: "aa:bb:cc:dd:ee:01", AtPercent: 40, Broadcast: "127.0.0.1"}},
 		{Name: "desk", Type: MachineClient, UPS: "ups1", ShutdownAt: 90, SkipShutdown: true, ClientKey: "0123456789abcdef"},
 	}}
-	low := upsEvent{ups: "ups1", status: "OB LB", charge: 5, chargeKnown: true, onBattery: true, lowBattery: true}
+	low := upsEvent{ups: "ups1", status: "OB LB", charge: 5, chargeKnown: true, onBattery: true, lowBattery: true, confirmed: true}
 	handleAPIShutdowns(srv, low)
 	handleClientShutdowns(srv, low)
 	stateMu.Lock()

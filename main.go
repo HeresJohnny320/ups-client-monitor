@@ -213,8 +213,10 @@ func sendDiscordWebhookAsync(url, message string) {
 }
 
 // isOnBatteryStatus reports whether a NUT ups.status means the UPS is running on battery.
+// "OL LB" (on mains, battery still low) is normal while recharging and doesn't count.
 func isOnBatteryStatus(status string) bool {
-	return strings.Contains(status, "OB") || strings.Contains(status, "LB")
+	f := statusFlags(status)
+	return f["OB"] || f["FSD"]
 }
 
 func parseCharge(s string) (int, bool) {
