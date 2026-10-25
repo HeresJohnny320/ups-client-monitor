@@ -59,6 +59,7 @@ type linkMsg struct {
 	ChargeOK   bool   `json:"charge_known,omitempty"`
 	ShutdownAt int    `json:"shutdown_at,omitempty"`
 	Paused     bool   `json:"paused,omitempty"` // the server has this client's shutdown turned off
+	Info       string `json:"info,omitempty"`   // update_result: what the client did
 }
 
 // systemShutdown is what a client runs when told to shut down (swapped out in tests).
@@ -409,8 +410,24 @@ func (h *linkHub) serve(store *settingsStore, raw net.Conn) {
 			msg := fmt.Sprintf("❌ **Client Shutdown Failed**: `%s`: %s. Retrying.", cc.name, m.Error)
 			log.Println(msg)
 			sendDiscordWebhookAsync(webhook, msg)
+		case "update_result":
+			if m.Error != "" {
+				log.Printf("[UPDATE] %s: %s", cc.name, m.Error)
+			} else {
+				log.Printf("[UPDATE] %s: %s", cc.name, m.Info)
+			}
+			updateReplied(cc.name)
 		}
 	}
+}
+
+// requestClientUpdate asks a connected client to update itself from the official releases.
+func requestClientUpdate(name string) error {
+	cc := hub.get(name)
+	if cc == nil {
+		return fmt.Errorf("%s isn't connected", name)
+	}
+	return cc.send(linkMsg{Type: "update"})
 }
 
 // linkedClient finds a client machine in the live settings.
@@ -526,7 +543,11 @@ func clientLinkState(name string) string {
 		}
 	}
 	if c := hub.get(name); c != nil {
-		return "connected from " + c.addr
+		addr := c.addr
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			addr = h
+		}
+		return "connected from " + addr
 	}
 	return "not connected"
 }
@@ -679,8 +700,24 @@ func runClientLink(store *settingsStore, conf ClientSettings) {
 				continue
 			}
 			writeLinkMsg(conn, &wmu, linkMsg{Type: "ack"})
+		case "update":
+			// The server can only ask for an update; the client decides, and only ever installs
+			// its own official release after checking it (see selfUpdate).
+			go func() {
+				reply := linkMsg{Type: "update_result"}
+				if conf.NoRemoteUpdate {
+					reply.Error = "updates from the server are turned off on this computer"
+				} else if tag, err := selfUpdate(); errors.Is(err, errUpToDate) {
+					reply.Info = "already up to date (" + version + ")"
+				} else if err != nil {
+					reply.Error = "couldn't update: " + err.Error()
+				} else {
+					reply.Info = "updating from " + version + " to " + tag + "; it will reconnect in a moment"
+				}
+				writeLinkMsg(conn, &wmu, reply)
+			}()
 		default:
-			// Clients only ever act on "shutdown"; anything else is ignored.
+			// Clients only act on "shutdown" and "update"; anything else is ignored.
 		}
 	}
 }

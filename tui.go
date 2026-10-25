@@ -357,7 +357,11 @@ func (u *ui) renderHeader() {
 	if u.lastStatus != nil {
 		pid = fmt.Sprintf(" (PID %d)", u.lastStatus.PID)
 	}
-	u.header.SetText(fmt.Sprintf("[::b] ⚡ UPS Monitor[::-] [gray]%s[-] │ attached to background monitor%s │ %s │ changes apply live", version, pid, role))
+	update := ""
+	if u.lastStatus != nil && u.lastStatus.Update != nil && u.lastStatus.Update.Available {
+		update = " │ [green]update available: " + tview.Escape(u.lastStatus.Update.Latest) + "[-]"
+	}
+	u.header.SetText(fmt.Sprintf("[::b] ⚡ UPS Monitor[::-] [gray]%s[-] │ attached to background monitor%s │ %s │ changes apply live%s", version, pid, role, update))
 }
 
 func chargeColor(c int) string {
@@ -467,7 +471,10 @@ func (u *ui) generalView() (tview.Primitive, tview.Primitive) {
 		c := s.Client
 		f.AddInputField("Failsafe (seconds, 0 = off)", strconv.Itoa(c.FailsafeSeconds), 6, tview.InputFieldInteger, func(t string) { c.FailsafeSeconds = atoi(t) })
 		f.AddInputField("Discord webhook URL", c.WebhookURL, 50, nil, func(t string) { c.WebhookURL = strings.TrimSpace(t) })
-		help = "Client: this computer only takes shutdown orders from your server (pair it under Server Connection).\nFailsafe: if the server goes silent while the UPS is on battery, shut down after this long."
+		f.AddCheckbox("Let the server update this computer", !c.NoRemoteUpdate, func(b bool) { c.NoRemoteUpdate = !b })
+		help = "Client: this computer only takes shutdown and update orders from your server (pair it under Server Connection).\n" +
+			"Failsafe: if the server goes silent while the UPS is on battery, shut down after this long.\n" +
+			"Updates from the server only ever install the newest official release, checked against its checksums."
 	}
 	f.AddButton("Save", func() {
 		out := cloneSettings(s)
@@ -576,6 +583,53 @@ func (u *ui) actionsView() (tview.Primitive, tview.Primitive) {
 		l.AddItem("Check clients", "Shows whether each paired PC is connected, from where, and which version it runs", 0, run("check-clients", "Client check"))
 	}
 	l.AddItem("Send test webhooks", "Posts a test message to every configured Discord webhook", 0, run("test-webhook", "Webhook test"))
+
+	self := "this computer"
+	if u.s.Role == "server" {
+		self = "this server"
+	}
+	l.AddItem("Check for updates", "Asks GitHub whether a newer release is out", 0, u.checkUpdates)
+	l.AddItem("Update "+self, "Installs the newest release (checked against its checksums) and restarts", 0, func() { u.startUpdate("") })
+	if u.s.Role == "server" {
+		l.AddItem("Update everything", "Asks every connected client to update, then updates this server", 0, func() { u.startUpdate("all") })
+	}
 	l.SetDoneFunc(u.backToMenu)
 	return frame("Run Actions", "", l), l
+}
+
+func (u *ui) checkUpdates() {
+	u.flash("[yellow]Checking for updates...[-]")
+	go func() {
+		resp, err := ctlCall(ctlRequest{Cmd: "update_check"})
+		u.app.QueueUpdateDraw(func() {
+			switch {
+			case err != nil:
+				u.alert("Couldn't check for updates:\n\n" + err.Error())
+			case resp.Update.Available:
+				u.flash("[green]Version " + tview.Escape(resp.Update.Latest) + " is available (running " + tview.Escape(resp.Update.Current) + ")[-]")
+			case resp.Update.Note != "":
+				u.flash("[yellow]" + tview.Escape(resp.Update.Note) + "[-]")
+			default:
+				u.flash("[green]✔ Up to date (" + tview.Escape(resp.Update.Current) + ")[-]")
+			}
+		})
+	}()
+}
+
+// startUpdate updates this machine (""), every client and then the server ("all"), or one client.
+func (u *ui) startUpdate(target string) {
+	what := map[string]string{"": "this machine", "all": "every connected client and then this server"}[target]
+	if what == "" {
+		what = target
+	}
+	u.confirm("Update "+what+" to the newest release?\n\nIt's checked against the release's checksums first, and nothing updates while a UPS is on battery. "+
+		"The monitor restarts, so this screen may lose the connection for a few seconds.", "Update", func() {
+		if _, err := ctlCall(ctlRequest{Cmd: "action", Action: "update", Name: target}); err != nil {
+			u.alert("Update failed:\n\n" + err.Error())
+			return
+		}
+		u.flash("[green]✔ Update started for " + tview.Escape(what) + "; watch Status & Logs[-]")
+		u.menu.SetCurrentItem(0)
+		u.app.SetFocus(u.menu)
+	})
 }

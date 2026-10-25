@@ -105,6 +105,8 @@ type ClientSettings struct {
 	Key               string `json:"key"`
 	FailsafeSeconds   int    `json:"failsafe_seconds"` // shut down if the server is silent this long while on battery (0 = off)
 	WebhookURL        string `json:"webhook_url"`
+	// NoRemoteUpdate stops the server from asking this client to update itself.
+	NoRemoteUpdate bool `json:"no_remote_update,omitempty"`
 }
 
 func (s *Settings) isServer() bool { return s.Role == "server" && s.Server != nil }

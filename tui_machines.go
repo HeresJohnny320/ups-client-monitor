@@ -373,6 +373,7 @@ func (u *ui) machineForm(idx int, d machineDraft, ret viewFunc) {
 	}
 	if idx >= 0 && m.Type == MachineClient && m.ClientKey != "" {
 		f.AddButton("Pairing Code", func() { u.showPairing(d.build()) })
+		f.AddButton("Update", func() { u.startUpdate(m.Name) })
 		f.AddButton("New Key", func() {
 			u.confirm("Give "+m.Name+" a new key? It disconnects now and must be paired again with the new code.", "New Key", func() {
 				m.ClientKey = newClientKey()

@@ -274,6 +274,7 @@ if ($_POST && !$down) {
 			}
 			$c['failsafe_seconds'] = (int)upsmon_post('failsafe');
 			$c['webhook_url'] = upsmon_post('webhook');
+			$c['no_remote_update'] = empty($_POST['allow_remote_update']);
 			$new['client'] = $c;
 		}
 		$new['role'] = upsmon_post('role');
@@ -286,11 +287,29 @@ if ($_POST && !$down) {
 		$names = array('test' => 'Quick self-test', 'test-long' => 'Deep self-test', 'check-targets' => 'Login check',
 			'check-clients' => 'Client check', 'test-webhook' => 'Webhook test');
 		$a = upsmon_post('action');
-		$r = upsmon_call(array('cmd' => 'action', 'action' => $a));
+		$target = upsmon_post('name');
+		$r = upsmon_call(array('cmd' => 'action', 'action' => $a, 'name' => $target));
 		if (empty($r['ok'])) {
 			$input_errors[] = $r['error'];
+		} elseif ($a === 'update') {
+			$who = $target === '' ? 'This ' . ($role === 'client' ? 'computer' : 'server') : ($target === 'all' ? 'Every connected client, then this server,' : $target);
+			$savemsg = $who . ' will update if a newer release is available. Watch Recent activity; this page may lose ' .
+				'the connection for a few seconds while the monitor restarts.';
 		} else {
 			$savemsg = ($names[$a] ?? $a) . ' started. The results show up under Recent activity.';
+		}
+		break;
+
+	case 'update_check':
+		$r = upsmon_call(array('cmd' => 'update_check'));
+		if (empty($r['ok'])) {
+			$input_errors[] = $r['error'];
+		} elseif (!empty($r['update']['available'])) {
+			$savemsg = 'Version ' . $r['update']['latest'] . ' is available (running ' . $r['update']['current'] . ').';
+		} elseif (!empty($r['update']['note'])) {
+			$input_errors[] = ucfirst($r['update']['note']) . '.';
+		} else {
+			$savemsg = 'Up to date (' . $r['update']['current'] . ').';
 		}
 		break;
 	}
@@ -429,6 +448,37 @@ if ($tab === 'status') {
 	}
 	echo '<button class="btn btn-default btn-sm" name="action" value="test-webhook">Send test webhooks</button>';
 	echo '</form>';
+	upsmon_box_close();
+
+	upsmon_box_open('Updates');
+	$u = $st['update'] ?? null;
+	$self = $role === 'client' ? 'this computer' : 'this server';
+	echo '<p>Running <b>' . upsmon_h($st['version'] ?? '?') . '</b>. ';
+	if ($u === null) {
+		echo 'Not checked for updates yet.';
+	} elseif (!empty($u['available'])) {
+		echo '<span class="text-success"><b>Version ' . upsmon_h($u['latest']) . ' is available.</b></span>';
+	} elseif (!empty($u['note'])) {
+		echo '<span class="text-muted">' . upsmon_h(ucfirst($u['note'])) . '.</span>';
+	} else {
+		echo 'Up to date.';
+	}
+	if ($u !== null) {
+		echo ' <span class="text-muted">Checked ' . upsmon_ago($u['checked']) . '.</span>';
+	}
+	echo '</p><p class="text-muted">Updates come from the official releases on GitHub and are checked against their checksums ' .
+		'before installing. Nothing updates while a UPS is on battery.</p>';
+	// One small form per button, so each sends exactly its own target.
+	$button = function ($act, $name, $label, $class) {
+		return '<form method="post" style="display:inline"><input type="hidden" name="tab" value="status">' .
+			'<input type="hidden" name="act" value="' . $act . '"><input type="hidden" name="action" value="update">' .
+			'<input type="hidden" name="name" value="' . upsmon_h($name) . '"><button class="btn btn-sm ' . $class . '">' . upsmon_h($label) . '</button></form> ';
+	};
+	echo $button('update_check', '', 'Check for updates', 'btn-default');
+	echo $button('action', '', 'Update ' . $self, 'btn-primary');
+	if ($role === 'server') {
+		echo $button('action', 'all', 'Update everything', 'btn-primary');
+	}
 	upsmon_box_close();
 	?>
 <script>
@@ -583,7 +633,7 @@ if ($tab === 'machines') {
 		upsmon_box_open('Machines');
 		echo '<p>Everything the server shuts down and/or wakes: Proxmox, TrueNAS, PCs running this app, and Wake-on-LAN-only devices.</p>';
 		echo '<div class="table-responsive"><table class="table table-striped table-hover table-condensed"><thead><tr>' .
-			'<th>Name</th><th>Type</th><th>UPS</th><th>Off at</th><th>On at</th><th>State</th><th></th></tr></thead><tbody>';
+			'<th>Name</th><th>Type</th><th>UPS</th><th>Off at</th><th>On at</th><th>State</th><th>Version</th><th></th></tr></thead><tbody>';
 		foreach ($machines as $i => $m) {
 			if ($m['type'] === 'wake_only') {
 				$off = '—';
@@ -595,6 +645,8 @@ if ($tab === 'machines') {
 			$on = empty($m['wake']) ? '—' : '≥ ' . (int)$m['wake']['at_percent'] . '%';
 			echo '<tr><td>' . upsmon_h($m['name']) . '</td><td>' . upsmon_h($upsmon_types[$m['type']] ?? $m['type']) . '</td><td>' .
 				upsmon_h($m['ups']) . '</td><td>' . $off . '</td><td>' . $on . '</td><td>' . upsmon_h($live[$m['name']]['shutdown_state'] ?? '') . '</td>' .
+				'<td>' . ($m['type'] !== 'client' ? '' : (($live[$m['name']]['version'] ?? '') !== '' ? upsmon_h($live[$m['name']]['version']) :
+					'<span class="text-muted">' . (strpos($live[$m['name']]['shutdown_state'] ?? '', 'connected from') === 0 ? 'older' : '—') . '</span>')) . '</td>' .
 				'<td style="white-space:nowrap"><a class="btn btn-xs btn-info" href="ups_monitor.php?tab=machines&amp;edit=' . $i . '">Edit</a> ';
 			if ($m['type'] !== 'wake_only') {
 				$is_off = !empty($m['skip_shutdown']);
@@ -606,13 +658,18 @@ if ($tab === 'machines') {
 			if ($m['type'] === 'client') {
 				echo '<form method="post" style="display:inline"><input type="hidden" name="tab" value="machines"><input type="hidden" name="act" value="pairing">' .
 					'<input type="hidden" name="name" value="' . upsmon_h($m['name']) . '"><button class="btn btn-xs btn-default">Pairing code</button></form> ';
+				if (strpos($live[$m['name']]['shutdown_state'] ?? '', 'connected from') === 0) {
+					echo '<form method="post" style="display:inline"><input type="hidden" name="tab" value="machines"><input type="hidden" name="act" value="action">' .
+						'<input type="hidden" name="action" value="update"><input type="hidden" name="name" value="' . upsmon_h($m['name']) . '">' .
+						'<button class="btn btn-xs btn-primary" title="Ask it to install the newest release">Update</button></form> ';
+				}
 			}
 			echo '<form method="post" style="display:inline" onsubmit="return confirm(\'Remove ' . upsmon_h(addslashes($m['name'])) . '? It will no longer be shut down or woken.\')">' .
 				'<input type="hidden" name="tab" value="machines"><input type="hidden" name="act" value="delete_machine"><input type="hidden" name="idx" value="' . $i . '">' .
 				'<button class="btn btn-xs btn-danger">Delete</button></form></td></tr>';
 		}
 		if (!$machines) {
-			echo '<tr><td colspan="7" class="text-muted">No machines yet.</td></tr>';
+			echo '<tr><td colspan="8" class="text-muted">No machines yet.</td></tr>';
 		}
 		echo '</tbody></table></div>';
 		echo '<a class="btn btn-success btn-sm" href="ups_monitor.php?tab=machines&amp;edit=new">Add machine</a>';
@@ -747,6 +804,8 @@ if ($tab === 'settings') {
 		upsmon_row('Failsafe', upsmon_input('failsafe', $c['failsafe_seconds'] ?? 60, 'number', 'min="0"'),
 			'If the server goes silent while the UPS is on battery, shut down after this many seconds. 0 turns it off.');
 		upsmon_row('Discord webhook', upsmon_input('webhook', $c['webhook_url'] ?? ''));
+		upsmon_row('', upsmon_check('allow_remote_update', empty($c['no_remote_update']), 'Let the server update this computer'),
+			'The server can only ask it to install the newest official release from GitHub, checked against its checksums.');
 		upsmon_panel_close();
 	}
 	echo '<button class="btn btn-primary">Save</button></form>';

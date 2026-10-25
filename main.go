@@ -110,11 +110,13 @@ func runDaemon() {
 	if err != nil {
 		log.Fatalf("[FATAL] %v", err)
 	}
+	cleanupAfterUpdate()
 	ln, err := listenControl()
 	if err != nil {
 		log.Fatalf("[FATAL] %v", err)
 	}
 	defer ln.Close()
+	controlListener = ln
 
 	if role := store.Get().Role; role == "" {
 		log.Printf("--- UPS Monitor Started (not configured yet: run ups-monitor in a terminal to set it up) --- version %s", version)
@@ -125,6 +127,7 @@ func runDaemon() {
 	stop := make(chan struct{})
 	go serveControl(ln, store, stop)
 	go startBackgroundTasks(store)
+	go startUpdateChecks(store)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

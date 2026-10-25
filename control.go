@@ -23,7 +23,7 @@ import (
 type ctlRequest struct {
 	Cmd      string    `json:"cmd"` // ping, get_settings, set_settings, status, action, link_info, pairing, test_machine, wake, stop
 	Settings *Settings `json:"settings,omitempty"`
-	Action   string    `json:"action,omitempty"`
+	Action   string    `json:"action,omitempty"`  // with "update", Name is "" (this machine), "all", or a client
 	Machine  *Machine  `json:"machine,omitempty"` // test_machine, wake (may be unsaved, straight from a form)
 	Name     string    `json:"name,omitempty"`    // pairing: the client machine's name
 }
@@ -36,6 +36,7 @@ type ctlResponse struct {
 	Link     *LinkInfo   `json:"link,omitempty"`
 	Pairing  []Pairing   `json:"pairing,omitempty"`
 	Info     string      `json:"info,omitempty"`
+	Update   *UpdateInfo `json:"update,omitempty"`
 }
 
 // Pairing is a client's pairing code for one of the server's addresses.
@@ -60,6 +61,7 @@ type MachineInfo struct {
 	ShutdownState string `json:"shutdown_state,omitempty"` // empty for wake-only machines
 	WakeAt        int    `json:"wake_at"`
 	WakeState     string `json:"wake_state,omitempty"` // empty without Wake-on-LAN
+	Version       string `json:"version,omitempty"`    // connected clients: the version they run
 }
 
 // LinkInfo is what the server UI needs to build pairing codes.
@@ -82,6 +84,7 @@ type StatusInfo struct {
 	LastPoll     time.Time            `json:"last_poll"`
 	UPS          []UPSInfo            `json:"ups"`
 	Machines     []MachineInfo        `json:"machines"`
+	Update       *UpdateInfo          `json:"update,omitempty"` // last update check
 	LastSelfTest map[string]time.Time `json:"last_self_test,omitempty"`
 	Logs         []string             `json:"logs"`
 }
@@ -233,13 +236,16 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			return ctlResponse{Error: err.Error()}
 		}
 		return ctlResponse{OK: true, Info: "Magic packet sent to " + w.MAC + " via " + strings.Join(via, ", ")}
+	case "update_check":
+		info, _ := checkForUpdate()
+		return ctlResponse{OK: true, Update: &info}
 	case "action":
 		s := store.Get()
 		if s.Role == "" {
 			return ctlResponse{Error: "the monitor is not configured yet"}
 		}
-		if s.isClient() && req.Action != "test-webhook" {
-			return ctlResponse{Error: "clients can only send test webhooks; the server runs everything else"}
+		if s.isClient() && req.Action != "test-webhook" && !(req.Action == "update" && req.Name == "") {
+			return ctlResponse{Error: "clients can only send test webhooks and update themselves; the server runs everything else"}
 		}
 		switch req.Action {
 		case "test":
@@ -252,6 +258,18 @@ func handleControl(req ctlRequest, store *settingsStore) ctlResponse {
 			go checkShutdownTargets(s)
 		case "check-clients":
 			go checkClients(s)
+		case "update":
+			switch {
+			case req.Name == "":
+				go runSelfUpdate()
+			case req.Name == "all" && s.isServer():
+				go updateEverything(s)
+			case s.isServer():
+				if err := requestClientUpdate(req.Name); err != nil {
+					return ctlResponse{Error: err.Error()}
+				}
+				log.Printf("[UPDATE] Asked %s to update itself.", req.Name)
+			}
 		default:
 			return ctlResponse{Error: "unknown action " + req.Action}
 		}
@@ -274,6 +292,7 @@ func statusSnapshot(s Settings) StatusInfo {
 		NutError:     nutLastError,
 		LastPoll:     lastPollStart,
 		Logs:         recentLogs.Lines(),
+		Update:       cachedUpdateInfo(),
 	}
 	for name, r := range upsReadings {
 		st.UPS = append(st.UPS, UPSInfo{Name: name, Status: r.Status, Charge: r.Charge, ChargeKnown: r.ChargeKnown})
@@ -303,6 +322,11 @@ func statusSnapshot(s Settings) StatusInfo {
 		st.NutHost = fmt.Sprintf("%s:%d", s.Server.NUT.Host, s.Server.NUT.Port)
 		for _, m := range s.Server.Machines {
 			mi := MachineInfo{Name: m.Name, Type: m.Type, UPS: m.UPS, ShutdownAt: m.ShutdownAt, WakeState: wakeState(m)}
+			if m.Type == MachineClient {
+				if c := hub.get(m.Name); c != nil {
+					mi.Version = c.version
+				}
+			}
 			if m.Wake != nil {
 				mi.WakeAt = m.Wake.AtPercent
 			}

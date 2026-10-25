@@ -24,7 +24,7 @@ Each machine gets its own battery level, so on a long outage the less important 
 
 You run it in **server** mode on something that stays on, like a Raspberry Pi plugged into the UPS. The server is the only thing that talks to NUT, and it makes all the decisions.
 
-Anything else that should shut itself down cleanly runs it in **client** mode. A client only needs a pairing code from the server. It never listens on the network: it makes a single outgoing, encrypted connection to the server, and the only thing the server can tell it to do is shut down.
+Anything else that should shut itself down cleanly runs it in **client** mode. A client only needs a pairing code from the server. It never listens on the network: it makes a single outgoing, encrypted connection to the server, and the only things the server can tell it to do are shut down and update itself.
 
 ## Getting started
 
@@ -76,7 +76,7 @@ Then open **Services → UPS Monitor**, go to **Settings**, choose **Server** an
 
 A few pfSense specifics:
 
-- To update, run the same command again. Your settings are kept.
+- To update, use **Update this server** on the Status tab, or run the same install command again. Your settings are kept either way.
 - Settings live in `/usr/local/etc/ups-monitor`. pfSense's own config backups don't include that folder, so copy `settings.json` and the two `link-*.pem` files somewhere safe.
 - The default LAN rule already lets PCs on your LAN reach port 3494. For PCs on other interfaces or VLANs, add a pass rule for TCP 3494 to "This Firewall". Don't open it on WAN.
 - The terminal UI works on pfSense too: run `ups-monitor` over SSH.
@@ -113,7 +113,19 @@ Each machine also has a **Shut down automatically** switch. Turn it off to leave
 
 If NUT reports low battery (`LB`) before a machine's level is reached, it gets shut down anyway.
 
-Machines are only woken after something happened to the power: either their UPS went on battery, or the server itself restarted (in case it lost power too; you can switch that off under General). So if you turn a PC off on purpose, it stays off. Once the UPS is back on mains and charged up to a machine's wake level, the server sends three wake packets, five minutes apart, in case the first one arrived while the machine was still shutting down.
+### When it acts, and when it doesn't
+
+UPSes aren't always tidy about what they report, so the server is careful not to act on false alarms:
+
+- **It waits for a second reading.** The UPS has to say "on battery" on two checks in a row (about 10 seconds with the default settings) before anything is shut down, so a short flicker does nothing.
+- **Nothing shuts down while the battery is 99% or full.** Some UPSes briefly report "low battery" with a full battery, for example during a self-test.
+- **Self-tests are expected.** While a battery self-test runs (one the monitor started, or one NUT reports), the UPS's low-battery signal is ignored. If the battery really drops to a machine's shutdown level during the test, that still counts.
+- **NUT has to be steady.** If NUT disconnects, nothing is acted on until it's back and has given two good readings in a row.
+- **"On mains, battery low"** (normal while recharging after an outage) doesn't count as an outage.
+
+### Waking machines back up
+
+A machine is only woken if the server shut it down, if its UPS reported low battery (so it may have lost power), or after the server itself restarts (in case it lost power too; you can switch that off under General). A flicker that didn't shut anything down doesn't wake anything, and if you turn a PC off on purpose, it stays off. Once the UPS is back on mains and charged up to a machine's wake level, the server sends three wake packets, five minutes apart, in case the first one arrived while the machine was still shutting down.
 
 A low wake level gets a machine back quickly. A high one waits until the battery could carry it through another outage.
 
@@ -164,7 +176,7 @@ When the server orders a shutdown (or the client's safety net kicks in), the cli
 | OpenBSD, NetBSD, DragonFly | `shutdown -p now` |
 | illumos and Solaris, e.g. OmniOS, SmartOS, OpenIndiana | `shutdown -y -g0 -i5` |
 
-That's the only thing a client will ever run, and only when its own paired server asks. The server can't make it run anything else.
+That's the only command a client will ever run, and only when its own paired server asks. Apart from that, the server can only ask a client to update itself (see [Updating](#updating)); it can't make it run anything else.
 
 ### On Proxmox
 
@@ -223,6 +235,22 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control" /v WaitToKillServiceTimeout /t R
 The first three apply to the user who runs them, so run them as the account that's normally logged in. Anything left unsaved is lost when Windows closes it.
 
 **Don't leave Windows Update pending.** Updates that install during shutdown ("Working on updates, don't turn off your computer") are the most common reason a Windows shutdown takes ages. Install them on your own schedule, so they aren't waiting for the next power cut.
+
+## Updating
+
+The program can update itself from this project's releases on GitHub:
+
+- **pfSense:** **Status → Updates** has **Check for updates**, **Update this server** and **Update everything**, which updates every connected client and then the server. Each client on the **Machines** tab also has its own **Update** button, and the **Version** column shows what each one runs.
+- **Terminal UI:** the same buttons are under **Run Actions**, and each client's edit screen has an **Update** button.
+- **Notifications:** the monitor checks for a new release every few hours and posts it to Discord once.
+
+What happens when you update:
+
+1. It downloads its own build for that system from the official GitHub releases. A stable version only moves to newer stable releases; an alpha moves to the newest build.
+2. It checks the download against the release's `SHA256SUMS.txt` and makes sure it starts. If anything doesn't match, nothing is installed.
+3. It swaps in the new version and restarts, keeping all its settings. On pfSense this also updates the web page. Clients reconnect to the server by themselves.
+
+It refuses to update while any UPS is on battery. If you'd rather a client only ever updates when you do it on that computer, untick **"Let the server update this computer"** in its settings. The server can only *ask* a client to update: the client always downloads from the official releases and checks the file itself.
 
 ## Client safety net
 
