@@ -150,10 +150,11 @@ func oldSettingsDirs() []string {
 
 // migrateSettings copies settings from an old per-user folder into the service's folder
 // (if it has none yet), so a setup made before installing as a service carries over.
-// The most recently changed one wins. It returns the folder it copied from, if any.
-func migrateSettings(dir string, candidates []string) string {
+// The most recently changed one wins. It returns the folder it copied from, if any, and
+// fails without touching anything else if the copy doesn't work.
+func migrateSettings(dir string, candidates []string) (string, error) {
 	if _, err := os.Stat(filepath.Join(pfPath(dir), "settings.json")); err == nil {
-		return ""
+		return "", nil
 	}
 	var from string
 	var newest time.Time
@@ -166,16 +167,20 @@ func migrateSettings(dir string, candidates []string) string {
 		}
 	}
 	if from == "" {
-		return ""
+		return "", nil
 	}
-	os.MkdirAll(pfPath(dir), 0700)
+	if err := os.MkdirAll(pfPath(dir), 0700); err != nil {
+		return "", fmt.Errorf("creating %s: %w", dir, err)
+	}
 	for _, f := range []string{"settings.json", "state.json", "link-cert.pem", "link-key.pem"} {
 		src := filepath.Join(from, f)
 		if fi, err := os.Stat(src); err == nil {
-			copyFile(src, filepath.Join(pfPath(dir), f), fi.Mode().Perm())
+			if err := copyFile(src, filepath.Join(pfPath(dir), f), fi.Mode().Perm()|0200); err != nil {
+				return "", fmt.Errorf("copying your settings from %s: %w", from, err)
+			}
 		}
 	}
-	return from
+	return from, nil
 }
 
 func pfSenseDetected() bool {
@@ -200,7 +205,11 @@ func installService() error {
 	step := func(msg string) { fmt.Println("  " + msg) }
 	fmt.Printf("Installing UPS Monitor %s...\n", version)
 
-	if old := migrateSettings(t.dir, oldSettingsDirs()); old != "" {
+	old, err := migrateSettings(t.dir, oldSettingsDirs())
+	if err != nil {
+		return err // nothing has been stopped or changed yet
+	}
+	if old != "" {
 		step("settings:      copied from " + old)
 		stopMonitorIn(old) // the old copy would otherwise keep running alongside
 	}

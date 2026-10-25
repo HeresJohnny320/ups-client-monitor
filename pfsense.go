@@ -93,7 +93,18 @@ status)
 esac
 `
 
-func pfPath(rel string) string { return filepath.Join(pfRoot, rel) }
+// pfPath turns a system path into a real one. Normally that's the path itself (with a
+// leading slash added to Unix paths written without one); tests point pfRoot at a folder.
+// Joining onto "/" would mangle Windows paths ("C:\ProgramData" became "\C:\ProgramData").
+func pfPath(p string) string {
+	if pfRoot == "/" {
+		if filepath.IsAbs(p) || filepath.VolumeName(p) != "" {
+			return p
+		}
+		return filepath.Join(string(filepath.Separator), p)
+	}
+	return filepath.Join(pfRoot, p)
+}
 
 func checkPfSense() error {
 	if pfRoot != "/" {

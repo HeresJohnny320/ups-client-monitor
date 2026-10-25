@@ -106,7 +106,7 @@ func TestSettingsMigration(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	os.Chtimes(filepath.Join(older, "settings.json"), past, past)
 
-	if from := migrateSettings(serviceSettingsDir, []string{older, newer}); from != newer {
+	if from, err := migrateSettings(serviceSettingsDir, []string{older, newer}); err != nil || from != newer {
 		t.Fatalf("copied from %q, want the most recently changed folder", from)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, serviceSettingsDir, "settings.json")); string(data) != "newer" {
@@ -117,7 +117,7 @@ func TestSettingsMigration(t *testing.T) {
 	}
 	// Once the service has settings, nothing is copied over them.
 	os.WriteFile(filepath.Join(older, "settings.json"), []byte("changed later"), 0600)
-	if from := migrateSettings(serviceSettingsDir, []string{older}); from != "" {
+	if from, _ := migrateSettings(serviceSettingsDir, []string{older}); from != "" {
 		t.Error("overwrote the service's existing settings")
 	}
 }
@@ -139,5 +139,26 @@ func TestServiceDefinitions(t *testing.T) {
 	}
 	if installTargetFor("windows").manager != "schtasks" || installTargetFor("darwin").manager != "launchd" {
 		t.Error("wrong service manager")
+	}
+}
+
+// The Windows installer failed with "mkdir \C:": system paths were joined onto "/".
+func TestSystemPathsAreUsedAsIs(t *testing.T) {
+	if pfRoot != "/" {
+		t.Fatal("pfRoot should be / outside the install tests")
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{windowsSettingsDir(), installTargetFor("windows").bin, `C:\ProgramData\ups-monitor`} {
+			if got := pfPath(p); got != p {
+				t.Errorf("pfPath(%q) = %q, want it unchanged", p, got)
+			}
+		}
+		return
+	}
+	cases := map[string]string{"/usr/local/etc/ups-monitor": "/usr/local/etc/ups-monitor", "usr/local/bin/ups-monitor": "/usr/local/bin/ups-monitor"}
+	for in, want := range cases {
+		if got := pfPath(in); got != want {
+			t.Errorf("pfPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
